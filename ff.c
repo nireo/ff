@@ -89,6 +89,13 @@ struct node {
     char* funcname;
 };
 
+typedef struct function function;
+struct function {
+    token* name;
+    node* body;
+    function* next;
+};
+
 typedef struct name name;
 struct name {
     char* pt;
@@ -369,6 +376,15 @@ node* new_null(void)
     return new_node(ND_NULL);
 }
 
+function* new_function(token* name, node* body)
+{
+    function* fn = malloc(sizeof(function));
+    memset(fn, 0, sizeof(function));
+    fn->name = name;
+    fn->body = body;
+    return fn;
+}
+
 void add_type_name(token* tok)
 {
     name* n = malloc(sizeof(name));
@@ -388,9 +404,7 @@ void add_builtin_type(char* s)
 
 void print_sym(token* tok)
 {
-#ifdef __APPLE__
     printf("_");
-#endif
     printf("%.*s", tok->len, tok->pt);
 }
 
@@ -421,15 +435,9 @@ void emit_func_start(token* name)
 {
     emit_global(name);
     emit_label(name);
-#ifdef __aarch64__
     printf("    stp x29, x30, [sp, #-16]!\n");
     printf("    mov x29, sp\n");
     printf("    mov w0, #0\n");
-#else
-    printf("    pushq %%rbp\n");
-    printf("    movq %%rsp, %%rbp\n");
-    printf("    movl $0, %%eax\n");
-#endif
 }
 
 void emit_return(void)
@@ -437,30 +445,18 @@ void emit_return(void)
     if (current_return_label < 0)
         return;
 
-#ifdef __aarch64__
     printf("    b .L.return.%d\n", current_return_label);
-#else
-    printf("    jmp .L.return.%d\n", current_return_label);
-#endif
 }
 
 void emit_imm(long val)
 {
-#ifdef __aarch64__
     printf("    mov x0, #%ld\n", val);
-#else
-    printf("    movq $%ld, %%rax\n", val);
-#endif
 }
 
 void emit_func_end(int label)
 {
     printf(".L.return.%d:\n", label);
-#ifdef __aarch64__
     printf("    ldp x29, x30, [sp], #16\n");
-#else
-    printf("    popq %%rbp\n");
-#endif
     printf("    ret\n");
 }
 
@@ -842,7 +838,6 @@ node* unary(void)
         return unary();
     }
 
-
     if (consume("sizeof")) {
         if (consume("(")) {
             if (is_type_start()) {
@@ -1023,32 +1018,44 @@ void gen_stmt(node* n)
     }
 }
 
-void external(void)
+void gen_function(function* fn)
+{
+    int return_label = new_label();
+    current_return_label = return_label;
+    emit_func_start(fn->name);
+    gen_stmt(fn->body);
+    emit_func_end(return_label);
+    current_return_label = -1;
+}
+
+void gen_program(function* prog)
+{
+    emit_text();
+
+    for (function* fn = prog; fn; fn = fn->next)
+        gen_function(fn);
+}
+
+function* external(void)
 {
     if (consume("typedef")) {
         declaration_rest(1);
-        return;
+        return NULL;
     }
 
     type_spec();
 
     if (consume(";"))
-        return;
+        return NULL;
 
     token* name = declarator();
 
     if (consume("(")) {
         param_list();
         if (consume(";"))
-            return;
-        int return_label = new_label();
-        current_return_label = return_label;
+            return NULL;
         node* body = compound();
-        emit_func_start(name);
-        gen_stmt(body);
-        emit_func_end(return_label);
-        current_return_label = -1;
-        return;
+        return new_function(name, body);
     }
 
     if (consume("="))
@@ -1061,18 +1068,29 @@ void external(void)
     }
 
     expect(";");
+    return NULL;
 }
 
-void program(void)
+function* program(void)
 {
+    function head;
+    function* tail = &head;
+    head.next = NULL;
+
     while (cur->ty != T_EOF) {
         if (equal("typedef") || is_type_start()) {
-            external();
+            function* fn = external();
+            if (fn) {
+                tail->next = fn;
+                tail = tail->next;
+            }
             continue;
         }
 
         statement();
     }
+
+    return head.next;
 }
 
 int main(void)
@@ -1095,8 +1113,8 @@ int main(void)
 
     buf[n] = 0;
     lex(buf);
-    emit_text();
-    program();
+    function* prog = program();
+    gen_program(prog);
 
     return 0;
 }
