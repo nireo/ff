@@ -3,5 +3,10 @@ run: a.out
 	cc out.s -o out
 	./out
 
+test: a.out
+	@zsh tests/run.sh
+
 a.out: ff.c
 	gcc ff.c
+
+.PHONY: run test
