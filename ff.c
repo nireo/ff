@@ -435,9 +435,9 @@ void emit_func_start(token* name)
 {
     emit_global(name);
     emit_label(name);
-    printf("    stp x29, x30, [sp, #-16]!\n");
-    printf("    mov x29, sp\n");
-    printf("    mov w0, #0\n");
+    printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
+    printf("    mov x29, sp                  // establish stack frame\n");
+    printf("    mov w0, #0                   // default return value\n");
 }
 
 void emit_return(void)
@@ -445,19 +445,19 @@ void emit_return(void)
     if (current_return_label < 0)
         return;
 
-    printf("    b .L.return.%d\n", current_return_label);
+    printf("    b .L.return.%d               // return\n", current_return_label);
 }
 
 void emit_imm(long val)
 {
-    printf("    mov x0, #%ld\n", val);
+    printf("    mov x0, #%ld                 // load immediate\n", val);
 }
 
 void emit_func_end(int label)
 {
     printf(".L.return.%d:\n", label);
-    printf("    ldp x29, x30, [sp], #16\n");
-    printf("    ret\n");
+    printf("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
+    printf("    ret                          // return to caller\n");
 }
 
 int is_type_name(token* tok)
@@ -968,6 +968,75 @@ node* expr(void)
     return assign();
 }
 
+void gen_expr(node* n);
+
+void push(void)
+{
+    printf("    str x0, [sp, #-16]!          // push x0\n");
+}
+
+void pop(char* reg)
+{
+    printf("    ldr %s, [sp], #16            // pop into %s\n", reg, reg);
+}
+
+void gen_binary(node* n)
+{
+    gen_expr(n->lhs);
+    push();
+    gen_expr(n->rhs);
+    pop("x1");
+
+    switch (n->kind) {
+    case ND_ADD:
+        printf("    add x0, x1, x0               // x0 = lhs + rhs\n");
+        return;
+    case ND_SUB:
+        printf("    sub x0, x1, x0               // x0 = lhs - rhs\n");
+        return;
+    case ND_MUL:
+        printf("    mul x0, x1, x0               // x0 = lhs * rhs\n");
+        return;
+    case ND_DIV:
+        printf("    sdiv x0, x1, x0              // x0 = lhs / rhs\n");
+        return;
+    case ND_MOD:
+        printf("    sdiv x2, x1, x0              // x2 = lhs / rhs\n");
+        printf("    msub x0, x2, x0, x1          // x0 = lhs %% rhs\n");
+        return;
+    case ND_EQ:
+        printf("    cmp x1, x0                   // compare lhs == rhs\n");
+        printf("    cset w0, eq                  // x0 = comparison result\n");
+        return;
+    case ND_NE:
+        printf("    cmp x1, x0                   // compare lhs != rhs\n");
+        printf("    cset w0, ne                  // x0 = comparison result\n");
+        return;
+    case ND_LT:
+        printf("    cmp x1, x0                   // compare lhs < rhs\n");
+        printf("    cset w0, lt                  // x0 = comparison result\n");
+        return;
+    case ND_LE:
+        printf("    cmp x1, x0                   // compare lhs <= rhs\n");
+        printf("    cset w0, le                  // x0 = comparison result\n");
+        return;
+    case ND_LOGAND:
+        printf("    cmp x1, #0                   // lhs != 0\n");
+        printf("    cset w1, ne\n");
+        printf("    cmp x0, #0                   // rhs != 0\n");
+        printf("    cset w0, ne\n");
+        printf("    and w0, w1, w0               // x0 = lhs && rhs\n");
+        return;
+    case ND_LOGOR:
+        printf("    cmp x1, #0                   // lhs != 0\n");
+        printf("    cset w1, ne\n");
+        printf("    cmp x0, #0                   // rhs != 0\n");
+        printf("    cset w0, ne\n");
+        printf("    orr w0, w1, w0               // x0 = lhs || rhs\n");
+        return;
+    }
+}
+
 void gen_expr(node* n)
 {
     if (!n)
@@ -976,6 +1045,24 @@ void gen_expr(node* n)
     switch (n->kind) {
     case ND_NUM:
         emit_imm(n->val);
+        return;
+    case ND_ADD:
+    case ND_SUB:
+    case ND_MUL:
+    case ND_DIV:
+    case ND_MOD:
+    case ND_EQ:
+    case ND_NE:
+    case ND_LT:
+    case ND_LE:
+    case ND_LOGAND:
+    case ND_LOGOR:
+        gen_binary(n);
+        return;
+    case ND_NOT:
+        gen_expr(n->lhs);
+        printf("    cmp x0, #0                   // logical not\n");
+        printf("    cset w0, eq                  // x0 = !x0\n");
         return;
 
     default:
