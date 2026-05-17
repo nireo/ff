@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/*
+ * Shared syntax model
+ */
+
 enum {
     T_EOF,
     T_IDENT,
@@ -103,12 +107,21 @@ struct name {
     name* next;
 };
 
+/*
+ * Shared utilities
+ */
+
+int startswith(char* p, char* s)
+{
+    return strncmp(p, s, strlen(s)) == 0;
+}
+
+/*
+ * Lexer
+ */
+
 token* tokens;
 token* cur;
-name* type_names;
-
-int labelseq;
-int current_return_label;
 
 int is_digit(char c)
 {
@@ -128,11 +141,6 @@ int is_ident2(char c)
 int is_space(char c)
 {
     return c == ' ' || c == '\n' || c == '\t' || c == '\r';
-}
-
-int startswith(char* p, char* s)
-{
-    return strncmp(p, s, strlen(s)) == 0;
 }
 
 token* new_token(int ty, char* pt, int len)
@@ -273,6 +281,12 @@ void lex(char* p)
     cur = tokens;
 }
 
+/*
+ * Parser
+ */
+
+name* type_names;
+
 int same(token* tok, char* s)
 {
     return tok->len == (int)strlen(s) && strncmp(tok->pt, s, tok->len) == 0;
@@ -400,64 +414,6 @@ void add_builtin_type(char* s)
     tok.pt = s;
     tok.len = strlen(s);
     add_type_name(&tok);
-}
-
-void print_sym(token* tok)
-{
-    printf("_");
-    printf("%.*s", tok->len, tok->pt);
-}
-
-void emit_text(void)
-{
-    printf(".text\n");
-}
-
-void emit_global(token* name)
-{
-    printf(".globl ");
-    print_sym(name);
-    printf("\n");
-}
-
-void emit_label(token* name)
-{
-    print_sym(name);
-    printf(":\n");
-}
-
-int new_label(void)
-{
-    return labelseq++;
-}
-
-void emit_func_start(token* name)
-{
-    emit_global(name);
-    emit_label(name);
-    printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
-    printf("    mov x29, sp                  // establish stack frame\n");
-    printf("    mov w0, #0                   // default return value\n");
-}
-
-void emit_return(void)
-{
-    if (current_return_label < 0)
-        return;
-
-    printf("    b .L.return.%d               // return\n", current_return_label);
-}
-
-void emit_imm(long val)
-{
-    printf("    mov x0, #%ld                 // load immediate\n", val);
-}
-
-void emit_func_end(int label)
-{
-    printf(".L.return.%d:\n", label);
-    printf("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
-    printf("    ret                          // return to caller\n");
 }
 
 int is_type_name(token* tok)
@@ -968,7 +924,129 @@ node* expr(void)
     return assign();
 }
 
+function* external(void)
+{
+    if (consume("typedef")) {
+        declaration_rest(1);
+        return NULL;
+    }
+
+    type_spec();
+
+    if (consume(";"))
+        return NULL;
+
+    token* name = declarator();
+
+    if (consume("(")) {
+        param_list();
+        if (consume(";"))
+            return NULL;
+        node* body = compound();
+        return new_function(name, body);
+    }
+
+    if (consume("="))
+        initializer();
+
+    while (consume(",")) {
+        declarator();
+        if (consume("="))
+            initializer();
+    }
+
+    expect(";");
+    return NULL;
+}
+
+function* program(void)
+{
+    function head;
+    function* tail = &head;
+    head.next = NULL;
+
+    while (cur->ty != T_EOF) {
+        if (equal("typedef") || is_type_start()) {
+            function* fn = external();
+            if (fn) {
+                tail->next = fn;
+                tail = tail->next;
+            }
+            continue;
+        }
+
+        statement();
+    }
+
+    return head.next;
+}
+
+/*
+ * Code generation
+ */
+
+int labelseq;
+int current_return_label = -1;
+
 void gen_expr(node* n);
+
+void print_sym(token* tok)
+{
+    printf("_");
+    printf("%.*s", tok->len, tok->pt);
+}
+
+void emit_text(void)
+{
+    printf(".text\n");
+}
+
+void emit_global(token* name)
+{
+    printf(".globl ");
+    print_sym(name);
+    printf("\n");
+}
+
+void emit_label(token* name)
+{
+    print_sym(name);
+    printf(":\n");
+}
+
+int new_label(void)
+{
+    return labelseq++;
+}
+
+void emit_func_start(token* name)
+{
+    emit_global(name);
+    emit_label(name);
+    printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
+    printf("    mov x29, sp                  // establish stack frame\n");
+    printf("    mov w0, #0                   // default return value\n");
+}
+
+void emit_return(void)
+{
+    if (current_return_label < 0)
+        return;
+
+    printf("    b .L.return.%d               // return\n", current_return_label);
+}
+
+void emit_imm(long val)
+{
+    printf("    mov x0, #%ld                 // load immediate\n", val);
+}
+
+void emit_func_end(int label)
+{
+    printf(".L.return.%d:\n", label);
+    printf("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
+    printf("    ret                          // return to caller\n");
+}
 
 void push(void)
 {
@@ -1123,63 +1201,6 @@ void gen_program(function* prog)
         gen_function(fn);
 }
 
-function* external(void)
-{
-    if (consume("typedef")) {
-        declaration_rest(1);
-        return NULL;
-    }
-
-    type_spec();
-
-    if (consume(";"))
-        return NULL;
-
-    token* name = declarator();
-
-    if (consume("(")) {
-        param_list();
-        if (consume(";"))
-            return NULL;
-        node* body = compound();
-        return new_function(name, body);
-    }
-
-    if (consume("="))
-        initializer();
-
-    while (consume(",")) {
-        declarator();
-        if (consume("="))
-            initializer();
-    }
-
-    expect(";");
-    return NULL;
-}
-
-function* program(void)
-{
-    function head;
-    function* tail = &head;
-    head.next = NULL;
-
-    while (cur->ty != T_EOF) {
-        if (equal("typedef") || is_type_start()) {
-            function* fn = external();
-            if (fn) {
-                tail->next = fn;
-                tail = tail->next;
-            }
-            continue;
-        }
-
-        statement();
-    }
-
-    return head.next;
-}
-
 int main(void)
 {
     char buf[65536];
@@ -1189,7 +1210,6 @@ int main(void)
     add_builtin_type("long");
     add_builtin_type("void");
     add_builtin_type("size_t");
-    current_return_label = -1;
 
     size_t n = fread(buf, 1, sizeof(buf) - 1, stdin);
 
