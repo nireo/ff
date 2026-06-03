@@ -63,6 +63,7 @@ struct obj {
     int is_local;
     int offset;
     obj* next;
+    obj* param_next;
 };
 
 typedef struct node node;
@@ -97,6 +98,9 @@ typedef struct function function;
 struct function {
     token* name;
     node* body;
+    obj* params;
+    obj* locals;
+    int stack_size;
     function* next;
 };
 
@@ -104,6 +108,7 @@ typedef struct name name;
 struct name {
     char* pt;
     int len;
+    int val;
     name* next;
 };
 
@@ -286,6 +291,10 @@ void lex(char* p)
  */
 
 name* type_names;
+name* enum_consts;
+obj* globals;
+obj* locals;
+int stack_offset;
 
 int same(token* tok, char* s)
 {
@@ -378,11 +387,50 @@ node* new_num(long val)
 node* new_var(token* tok)
 {
     node* n = new_node(ND_VAR);
+    char* name = token_to_str(tok);
+
+    for (obj* var = locals; var; var = var->next) {
+        if (strcmp(var->name, name) == 0) {
+            n->var = var;
+            return n;
+        }
+    }
+
+    for (obj* var = globals; var; var = var->next) {
+        if (strcmp(var->name, name) == 0) {
+            n->var = var;
+            return n;
+        }
+    }
+
+    obj* var = malloc(sizeof(obj));
+    memset(var, 0, sizeof(obj));
+    var->name = name;
+    n->var = var;
+    return n;
+}
+
+obj* new_gvar(token* tok)
+{
     obj* var = malloc(sizeof(obj));
     memset(var, 0, sizeof(obj));
     var->name = token_to_str(tok);
-    n->var = var;
-    return n;
+    var->next = globals;
+    globals = var;
+    return var;
+}
+
+obj* new_lvar(token* tok)
+{
+    obj* var = malloc(sizeof(obj));
+    memset(var, 0, sizeof(obj));
+    var->name = token_to_str(tok);
+    var->is_local = 1;
+    stack_offset += 8;
+    var->offset = stack_offset;
+    var->next = locals;
+    locals = var;
+    return var;
 }
 
 node* new_null(void)
@@ -390,12 +438,15 @@ node* new_null(void)
     return new_node(ND_NULL);
 }
 
-function* new_function(token* name, node* body)
+function* new_function(token* name, obj* params, node* body)
 {
     function* fn = malloc(sizeof(function));
     memset(fn, 0, sizeof(function));
     fn->name = name;
     fn->body = body;
+    fn->params = params;
+    fn->locals = locals;
+    fn->stack_size = (stack_offset + 15) / 16 * 16;
     return fn;
 }
 
@@ -404,8 +455,32 @@ void add_type_name(token* tok)
     name* n = malloc(sizeof(name));
     n->pt = tok->pt;
     n->len = tok->len;
+    n->val = 0;
     n->next = type_names;
     type_names = n;
+}
+
+void add_enum_const(token* tok, int val)
+{
+    name* n = malloc(sizeof(name));
+    n->pt = tok->pt;
+    n->len = tok->len;
+    n->val = val;
+    n->next = enum_consts;
+    enum_consts = n;
+}
+
+name* find_enum_const(token* tok)
+{
+    name* n = enum_consts;
+
+    while (n) {
+        if (tok->len == n->len && strncmp(tok->pt, n->pt, tok->len) == 0)
+            return n;
+        n = n->next;
+    }
+
+    return NULL;
 }
 
 void add_builtin_type(char* s)
@@ -435,7 +510,7 @@ int is_type_start(void)
 }
 
 node* expr(void);
-node* declaration_rest(int is_typedef);
+node* declaration_rest(int is_typedef, int make_lvars);
 node* statement(void);
 
 void enum_spec(void)
@@ -448,10 +523,16 @@ void enum_spec(void)
     if (!consume("{"))
         return;
 
+    int val = 0;
     while (!consume("}")) {
-        expect_ident();
-        if (consume("="))
+        token* name = expect_ident();
+        if (consume("=")) {
+            if (cur->ty == T_NUM)
+                val = cur->val;
             expr();
+        }
+        add_enum_const(name, val);
+        val = val + 1;
         consume(",");
     }
 }
@@ -464,7 +545,7 @@ void type_spec(void)
 
         if (consume("{")) {
             while (!consume("}"))
-                declaration_rest(0);
+                declaration_rest(0, 0);
         }
         return;
     }
@@ -499,26 +580,30 @@ token* declarator(void)
     return name;
 }
 
-void initializer(void)
+node* initializer(void)
 {
     if (consume("{")) {
         if (!consume("}")) {
             initializer();
             while (consume(",")) {
                 if (consume("}"))
-                    return;
+                    return new_null();
                 initializer();
             }
             expect("}");
         }
-        return;
+        return new_null();
     }
 
-    expr();
+    return expr();
 }
 
-node* declaration_rest(int is_typedef)
+node* declaration_rest(int is_typedef, int make_lvars)
 {
+    node head;
+    node* tail = &head;
+    head.next = NULL;
+
     type_spec();
 
     if (consume(";"))
@@ -527,40 +612,73 @@ node* declaration_rest(int is_typedef)
     token* decl_name = declarator();
     if (is_typedef)
         add_type_name(decl_name);
+    obj* var = NULL;
+    if (make_lvars)
+        var = new_lvar(decl_name);
 
-    if (consume("="))
-        initializer();
+    if (consume("=")) {
+        node* init = initializer();
+        if (var && init->kind != ND_NULL) {
+            node* lhs = new_node(ND_VAR);
+            lhs->var = var;
+            tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
+            tail = tail->next;
+        }
+    }
 
     while (consume(",")) {
         decl_name = declarator();
         if (is_typedef)
             add_type_name(decl_name);
-        if (consume("="))
-            initializer();
+        var = NULL;
+        if (make_lvars)
+            var = new_lvar(decl_name);
+        if (consume("=")) {
+            node* init = initializer();
+            if (var && init->kind != ND_NULL) {
+                node* lhs = new_node(ND_VAR);
+                lhs->var = var;
+                tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
+                tail = tail->next;
+            }
+        }
     }
 
     expect(";");
-    return new_null();
+    if (!head.next)
+        return new_null();
+
+    node* n = new_node(ND_BLOCK);
+    n->body = head.next;
+    return n;
 }
 
-void param_list(void)
+obj* param_list(void)
 {
+    obj head;
+    obj* tail = &head;
+    head.next = NULL;
+    head.param_next = NULL;
+
     if (consume(")"))
-        return;
+        return NULL;
 
     if (equal("void") && same(cur->next, ")")) {
         cur = cur->next;
         expect(")");
-        return;
+        return NULL;
     }
 
     for (;;) {
         type_spec();
-        if (!equal(",") && !equal(")"))
-            declarator();
+        if (!equal(",") && !equal(")")) {
+            token* name = declarator();
+            tail->param_next = new_lvar(name);
+            tail = tail->param_next;
+        }
 
         if (consume(")"))
-            return;
+            return head.param_next;
         expect(",");
     }
 }
@@ -576,13 +694,13 @@ node* compound_after_open(void)
             error_at(cur, "expected '}'");
 
         if (consume("typedef")) {
-            tail->next = declaration_rest(1);
+            tail->next = declaration_rest(1, 0);
             tail = tail->next;
             continue;
         }
 
         if (is_type_start()) {
-            tail->next = declaration_rest(0);
+            tail->next = declaration_rest(0, 1);
             tail = tail->next;
             continue;
         }
@@ -641,7 +759,7 @@ node* statement(void)
         node* n = new_node(ND_FOR);
         expect("(");
         if (is_type_start()) {
-            n->init = declaration_rest(0);
+            n->init = declaration_rest(0, 1);
         } else {
             if (!consume(";")) {
                 n->init = expr();
@@ -703,6 +821,17 @@ node* primary(void)
     }
 
     if (cur->ty == T_IDENT) {
+        if (same(cur, "NULL")) {
+            cur = cur->next;
+            return new_num(0);
+        }
+
+        name* ec = find_enum_const(cur);
+        if (ec) {
+            cur = cur->next;
+            return new_num(ec->val);
+        }
+
         node* n = new_var(cur);
         cur = cur->next;
         return n;
@@ -927,7 +1056,7 @@ node* expr(void)
 function* external(void)
 {
     if (consume("typedef")) {
-        declaration_rest(1);
+        declaration_rest(1, 0);
         return NULL;
     }
 
@@ -939,20 +1068,24 @@ function* external(void)
     token* name = declarator();
 
     if (consume("(")) {
-        param_list();
+        locals = NULL;
+        stack_offset = 0;
+        obj* params = param_list();
         if (consume(";"))
             return NULL;
         node* body = compound();
-        return new_function(name, body);
+        return new_function(name, params, body);
     }
 
     if (consume("="))
         initializer();
+    new_gvar(name);
 
     while (consume(",")) {
-        declarator();
+        token* gname = declarator();
         if (consume("="))
             initializer();
+        new_gvar(gname);
     }
 
     expect(";");
@@ -996,9 +1129,20 @@ void print_sym(token* tok)
     printf("%.*s", tok->len, tok->pt);
 }
 
+void print_name(char* name)
+{
+    printf("_");
+    printf("%s", name);
+}
+
 void emit_text(void)
 {
     printf(".text\n");
+}
+
+void emit_data(void)
+{
+    printf(".data\n");
 }
 
 void emit_global(token* name)
@@ -1019,12 +1163,23 @@ int new_label(void)
     return labelseq++;
 }
 
-void emit_func_start(token* name)
+void emit_func_start(token* name, int stack_size, obj* params)
 {
     emit_global(name);
     emit_label(name);
     printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
     printf("    mov x29, sp                  // establish stack frame\n");
+    if (stack_size)
+        printf("    sub sp, sp, #%d              // allocate locals\n", stack_size);
+    int i = 0;
+    for (obj* var = params; var; var = var->param_next) {
+        if (i >= 8) {
+            fprintf(stderr, "too many parameters\n");
+            exit(1);
+        }
+        printf("    str x%d, [x29, #-%d]         // save parameter %s\n", i, var->offset, var->name);
+        i = i + 1;
+    }
     printf("    mov w0, #0                   // default return value\n");
 }
 
@@ -1044,6 +1199,7 @@ void emit_imm(long val)
 void emit_func_end(int label)
 {
     printf(".L.return.%d:\n", label);
+    printf("    mov sp, x29                  // release locals\n");
     printf("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
     printf("    ret                          // return to caller\n");
 }
@@ -1115,6 +1271,30 @@ void gen_binary(node* n)
     }
 }
 
+void gen_addr(node* n)
+{
+    switch (n->kind) {
+    case ND_VAR:
+        if (n->var->is_local) {
+            printf("    sub x0, x29, #%d             // address of %s\n", n->var->offset, n->var->name);
+            return;
+        }
+        printf("    adrp x0, ");
+        print_name(n->var->name);
+        printf("@PAGE              // address of global %s\n", n->var->name);
+        printf("    add x0, x0, ");
+        print_name(n->var->name);
+        printf("@PAGEOFF\n");
+        return;
+    case ND_DEREF:
+        gen_expr(n->lhs);
+        return;
+    default:
+        fprintf(stderr, "not an lvalue\n");
+        exit(1);
+    }
+}
+
 void gen_expr(node* n)
 {
     if (!n)
@@ -1123,6 +1303,24 @@ void gen_expr(node* n)
     switch (n->kind) {
     case ND_NUM:
         emit_imm(n->val);
+        return;
+    case ND_VAR:
+        gen_addr(n);
+        printf("    ldr x0, [x0]                 // load variable\n");
+        return;
+    case ND_ASSIGN:
+        gen_addr(n->lhs);
+        push();
+        gen_expr(n->rhs);
+        pop("x1");
+        printf("    str x0, [x1]                 // store variable\n");
+        return;
+    case ND_ADDR:
+        gen_addr(n->lhs);
+        return;
+    case ND_DEREF:
+        gen_expr(n->lhs);
+        printf("    ldr x0, [x0]                 // dereference\n");
         return;
     case ND_ADD:
     case ND_SUB:
@@ -1187,7 +1385,7 @@ void gen_function(function* fn)
 {
     int return_label = new_label();
     current_return_label = return_label;
-    emit_func_start(fn->name);
+    emit_func_start(fn->name, fn->stack_size, fn->params);
     gen_stmt(fn->body);
     emit_func_end(return_label);
     current_return_label = -1;
@@ -1195,6 +1393,17 @@ void gen_function(function* fn)
 
 void gen_program(function* prog)
 {
+    emit_data();
+
+    for (obj* var = globals; var; var = var->next) {
+        printf(".globl ");
+        print_name(var->name);
+        printf("\n");
+        print_name(var->name);
+        printf(":\n");
+        printf("    .zero 8\n");
+    }
+
     emit_text();
 
     for (function* fn = prog; fn; fn = fn->next)
