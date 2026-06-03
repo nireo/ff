@@ -1370,10 +1370,41 @@ void gen_stmt(node* n)
         return;
 
     case ND_IF:
+    {
+        int label = new_label();
+        gen_expr(n->cond);
+        printf("    cmp x0, #0                   // if condition\n");
+        if (n->els) {
+            printf("    beq .L.else.%d\n", label);
+            gen_stmt(n->then);
+            printf("    b .L.end.%d\n", label);
+            printf(".L.else.%d:\n", label);
+            gen_stmt(n->els);
+            printf(".L.end.%d:\n", label);
+            return;
+        }
+        printf("    beq .L.end.%d\n", label);
+        gen_stmt(n->then);
+        printf(".L.end.%d:\n", label);
         return;
+    }
 
     case ND_FOR:
+    {
+        int label = new_label();
+        gen_stmt(n->init);
+        printf(".L.begin.%d:\n", label);
+        if (n->cond) {
+            gen_expr(n->cond);
+            printf("    cmp x0, #0                   // loop condition\n");
+            printf("    beq .L.end.%d\n", label);
+        }
+        gen_stmt(n->then);
+        gen_expr(n->inc);
+        printf("    b .L.begin.%d\n", label);
+        printf(".L.end.%d:\n", label);
         return;
+    }
 
     default:
         gen_expr(n);

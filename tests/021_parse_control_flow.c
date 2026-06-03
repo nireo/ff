@@ -1,4 +1,4 @@
-// EXPECT: 12
+// EXPECT: 99
 int main(void)
 {
     if (1)
