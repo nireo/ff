@@ -1131,6 +1131,21 @@ void print_sym(token* tok)
 
 void print_name(char* name)
 {
+    if (strcmp(name, "stdin") == 0) {
+        printf("___stdinp");
+        return;
+    }
+
+    if (strcmp(name, "stdout") == 0) {
+        printf("___stdoutp");
+        return;
+    }
+
+    if (strcmp(name, "stderr") == 0) {
+        printf("___stderrp");
+        return;
+    }
+
     printf("_");
     printf("%s", name);
 }
@@ -1143,6 +1158,11 @@ void emit_text(void)
 void emit_data(void)
 {
     printf(".data\n");
+}
+
+int is_std_stream(char* name)
+{
+    return strcmp(name, "stdin") == 0 || strcmp(name, "stdout") == 0 || strcmp(name, "stderr") == 0;
 }
 
 void emit_global(token* name)
@@ -1271,12 +1291,46 @@ void gen_binary(node* n)
     }
 }
 
+void gen_funcall(node* n)
+{
+    int nargs = 0;
+
+    for (node* arg = n->args; arg; arg = arg->next) {
+        if (nargs >= 8) {
+            fprintf(stderr, "too many arguments\n");
+            exit(1);
+        }
+        gen_expr(arg);
+        push();
+        nargs = nargs + 1;
+    }
+
+    for (int i = nargs - 1; i >= 0; i = i - 1) {
+        char reg[3];
+        reg[0] = 'x';
+        reg[1] = '0' + i;
+        reg[2] = 0;
+        pop(reg);
+    }
+
+    printf("    bl _%s                       // call function\n", n->funcname);
+}
+
 void gen_addr(node* n)
 {
     switch (n->kind) {
     case ND_VAR:
         if (n->var->is_local) {
             printf("    sub x0, x29, #%d             // address of %s\n", n->var->offset, n->var->name);
+            return;
+        }
+        if (is_std_stream(n->var->name)) {
+            printf("    adrp x0, ");
+            print_name(n->var->name);
+            printf("@GOTPAGE          // address of external global %s\n", n->var->name);
+            printf("    ldr x0, [x0, ");
+            print_name(n->var->name);
+            printf("@GOTPAGEOFF]\n");
             return;
         }
         printf("    adrp x0, ");
@@ -1321,6 +1375,9 @@ void gen_expr(node* n)
     case ND_DEREF:
         gen_expr(n->lhs);
         printf("    ldr x0, [x0]                 // dereference\n");
+        return;
+    case ND_FUNCALL:
+        gen_funcall(n);
         return;
     case ND_ADD:
     case ND_SUB:

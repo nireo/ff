@@ -1,10 +1,13 @@
 // EXPECT: 17
-int puts(char* s);
+int ignored(int x)
+{
+    return x;
+}
 
 int main(void)
 {
-    // Function calls and strings are parsed, but call codegen is not implemented yet.
-    puts("ignored");
+    // Function calls and comments should compile without affecting the result.
+    ignored(0);
     /* Block comments should be skipped by the lexer. */
     return 17;
 }
