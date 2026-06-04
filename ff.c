@@ -40,6 +40,7 @@ enum {
     ND_ADDR,
     ND_DEREF,
     ND_NOT,
+    ND_STR,
 };
 
 typedef struct token token;
@@ -92,6 +93,8 @@ struct node {
     long val;
 
     char* funcname;
+    int str_label;
+    token* str_tok;
 };
 
 typedef struct function function;
@@ -110,6 +113,13 @@ struct name {
     int len;
     int val;
     name* next;
+};
+
+typedef struct string_lit string_lit;
+struct string_lit {
+    int label;
+    token* tok;
+    string_lit* next;
 };
 
 /*
@@ -295,6 +305,8 @@ name* enum_consts;
 obj* globals;
 obj* locals;
 int stack_offset;
+string_lit* strings;
+int string_labelseq;
 
 int same(token* tok, char* s)
 {
@@ -382,6 +394,44 @@ node* new_num(long val)
     node* n = new_node(ND_NUM);
     n->val = val;
     return n;
+}
+
+node* new_string(token* tok)
+{
+    string_lit* s = malloc(sizeof(string_lit));
+    s->label = string_labelseq;
+    string_labelseq = string_labelseq + 1;
+    s->tok = tok;
+    s->next = strings;
+    strings = s;
+
+    node* n = new_node(ND_STR);
+    n->str_label = s->label;
+    n->str_tok = tok;
+    return n;
+}
+
+int decode_escape(char c)
+{
+    if (c == 'n')
+        return '\n';
+    if (c == 't')
+        return '\t';
+    if (c == 'r')
+        return '\r';
+    if (c == '0')
+        return 0;
+    return c;
+}
+
+int char_val(token* tok)
+{
+    char* p = tok->pt + 1;
+
+    if (*p == '\\')
+        return decode_escape(p[1]);
+
+    return *p;
 }
 
 node* new_var(token* tok)
@@ -814,8 +864,20 @@ node* statement(void)
 
 node* primary(void)
 {
-    if (cur->ty == T_NUM || cur->ty == T_STR || cur->ty == T_CHAR) {
+    if (cur->ty == T_NUM) {
         node* n = new_num(cur->val);
+        cur = cur->next;
+        return n;
+    }
+
+    if (cur->ty == T_CHAR) {
+        node* n = new_num(char_val(cur));
+        cur = cur->next;
+        return n;
+    }
+
+    if (cur->ty == T_STR) {
+        node* n = new_string(cur);
         cur = cur->next;
         return n;
     }
@@ -1358,6 +1420,10 @@ void gen_expr(node* n)
     case ND_NUM:
         emit_imm(n->val);
         return;
+    case ND_STR:
+        printf("    adrp x0, .L.str.%d@PAGE      // address of string literal\n", n->str_label);
+        printf("    add x0, x0, .L.str.%d@PAGEOFF\n", n->str_label);
+        return;
     case ND_VAR:
         gen_addr(n);
         printf("    ldr x0, [x0]                 // load variable\n");
@@ -1482,6 +1548,11 @@ void gen_function(function* fn)
 void gen_program(function* prog)
 {
     emit_data();
+
+    for (string_lit* s = strings; s; s = s->next) {
+        printf(".L.str.%d:\n", s->label);
+        printf("    .asciz %.*s\n", s->tok->len, s->tok->pt);
+    }
 
     for (obj* var = globals; var; var = var->next) {
         printf(".globl ");
