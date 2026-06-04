@@ -43,6 +43,16 @@ enum {
     ND_STR,
 };
 
+enum {
+    TY_CHAR,
+    TY_INT,
+    TY_LONG,
+    TY_VOID,
+    TY_PTR,
+    TY_ARRAY,
+    TY_STRUCT,
+};
+
 typedef struct token token;
 struct token {
     char* pt;
@@ -55,6 +65,9 @@ struct token {
 typedef struct type type;
 struct type {
     int kind;
+    int size;
+    int array_len;
+    type* base;
 };
 
 typedef struct obj obj;
@@ -307,6 +320,51 @@ obj* locals;
 int stack_offset;
 string_lit* strings;
 int string_labelseq;
+type* ty_char;
+type* ty_int;
+type* ty_long;
+type* ty_void;
+
+int align_to(int n, int align)
+{
+    return (n + align - 1) / align * align;
+}
+
+type* new_type(int kind, int size)
+{
+    type* ty = malloc(sizeof(type));
+    memset(ty, 0, sizeof(type));
+    ty->kind = kind;
+    ty->size = size;
+    return ty;
+}
+
+type* pointer_to(type* base)
+{
+    type* ty = new_type(TY_PTR, 8);
+    ty->base = base;
+    return ty;
+}
+
+type* array_of(type* base, int len)
+{
+    type* ty = new_type(TY_ARRAY, base->size * len);
+    ty->base = base;
+    ty->array_len = len;
+    return ty;
+}
+
+int is_ptrlike(type* ty)
+{
+    return ty && (ty->kind == TY_PTR || ty->kind == TY_ARRAY);
+}
+
+type* ptr_base(type* ty)
+{
+    if (ty && ty->base)
+        return ty->base;
+    return ty_char;
+}
 
 int same(token* tok, char* s)
 {
@@ -379,6 +437,13 @@ node* new_binary(int kind, node* lhs, node* rhs)
     node* n = new_node(kind);
     n->lhs = lhs;
     n->rhs = rhs;
+    n->ty = ty_int;
+    if ((kind == ND_ADD || kind == ND_SUB) && is_ptrlike(lhs->ty))
+        n->ty = lhs->ty;
+    if (kind == ND_ADD && is_ptrlike(rhs->ty))
+        n->ty = rhs->ty;
+    if (kind == ND_ASSIGN)
+        n->ty = lhs->ty;
     return n;
 }
 
@@ -386,6 +451,13 @@ node* new_unary(int kind, node* lhs)
 {
     node* n = new_node(kind);
     n->lhs = lhs;
+    n->ty = ty_int;
+    if (lhs)
+        n->ty = lhs->ty;
+    if (kind == ND_ADDR)
+        n->ty = pointer_to(lhs->ty);
+    if (kind == ND_DEREF)
+        n->ty = ptr_base(lhs->ty);
     return n;
 }
 
@@ -393,6 +465,7 @@ node* new_num(long val)
 {
     node* n = new_node(ND_NUM);
     n->val = val;
+    n->ty = ty_int;
     return n;
 }
 
@@ -406,6 +479,7 @@ node* new_string(token* tok)
     strings = s;
 
     node* n = new_node(ND_STR);
+    n->ty = pointer_to(ty_char);
     n->str_label = s->label;
     n->str_tok = tok;
     return n;
@@ -442,6 +516,7 @@ node* new_var(token* tok)
     for (obj* var = locals; var; var = var->next) {
         if (strcmp(var->name, name) == 0) {
             n->var = var;
+            n->ty = var->ty;
             return n;
         }
     }
@@ -449,6 +524,7 @@ node* new_var(token* tok)
     for (obj* var = globals; var; var = var->next) {
         if (strcmp(var->name, name) == 0) {
             n->var = var;
+            n->ty = var->ty;
             return n;
         }
     }
@@ -456,27 +532,32 @@ node* new_var(token* tok)
     obj* var = malloc(sizeof(obj));
     memset(var, 0, sizeof(obj));
     var->name = name;
+    var->ty = ty_long;
     n->var = var;
+    n->ty = var->ty;
     return n;
 }
 
-obj* new_gvar(token* tok)
+obj* new_gvar(token* tok, type* ty)
 {
     obj* var = malloc(sizeof(obj));
     memset(var, 0, sizeof(obj));
     var->name = token_to_str(tok);
+    var->ty = ty;
     var->next = globals;
     globals = var;
     return var;
 }
 
-obj* new_lvar(token* tok)
+obj* new_lvar(token* tok, type* ty)
 {
     obj* var = malloc(sizeof(obj));
     memset(var, 0, sizeof(obj));
     var->name = token_to_str(tok);
+    var->ty = ty;
     var->is_local = 1;
-    stack_offset += 8;
+    stack_offset = align_to(stack_offset, 8);
+    stack_offset += ty->size;
     var->offset = stack_offset;
     var->next = locals;
     locals = var;
@@ -587,7 +668,7 @@ void enum_spec(void)
     }
 }
 
-void type_spec(void)
+type* type_spec(void)
 {
     if (consume("struct")) {
         if (cur->ty == T_IDENT)
@@ -597,37 +678,53 @@ void type_spec(void)
             while (!consume("}"))
                 declaration_rest(0, 0);
         }
-        return;
+        return new_type(TY_STRUCT, 8);
     }
 
     if (equal("enum")) {
         enum_spec();
-        return;
+        return ty_int;
     }
 
     if (cur->ty == T_IDENT && is_type_name(cur)) {
+        type* ty = ty_long;
+        if (same(cur, "char"))
+            ty = ty_char;
+        if (same(cur, "int"))
+            ty = ty_int;
+        if (same(cur, "long"))
+            ty = ty_long;
+        if (same(cur, "void"))
+            ty = ty_void;
+        if (same(cur, "size_t"))
+            ty = ty_long;
         cur = cur->next;
-        return;
+        return ty;
     }
 
     error_at(cur, "expected type");
+    return ty_int;
 }
 
-token* declarator(void)
+type* declarator(type* ty, token** name)
 {
     while (consume("*"))
-        ;
+        ty = pointer_to(ty);
 
-    token* name = expect_ident();
+    *name = expect_ident();
 
     while (consume("[")) {
+        int len = 0;
         if (!consume("]")) {
+            if (cur->ty == T_NUM)
+                len = cur->val;
             expr();
             expect("]");
         }
+        ty = array_of(ty, len);
     }
 
-    return name;
+    return ty;
 }
 
 node* initializer(void)
@@ -654,40 +751,43 @@ node* declaration_rest(int is_typedef, int make_lvars)
     node* tail = &head;
     head.next = NULL;
 
-    type_spec();
+    type* base_ty = type_spec();
 
     if (consume(";"))
         return new_null();
 
-    token* decl_name = declarator();
+    token* decl_name;
+    type* ty = declarator(base_ty, &decl_name);
     if (is_typedef)
         add_type_name(decl_name);
     obj* var = NULL;
     if (make_lvars)
-        var = new_lvar(decl_name);
+        var = new_lvar(decl_name, ty);
 
     if (consume("=")) {
         node* init = initializer();
         if (var && init->kind != ND_NULL) {
             node* lhs = new_node(ND_VAR);
             lhs->var = var;
+            lhs->ty = var->ty;
             tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
             tail = tail->next;
         }
     }
 
     while (consume(",")) {
-        decl_name = declarator();
+        ty = declarator(base_ty, &decl_name);
         if (is_typedef)
             add_type_name(decl_name);
         var = NULL;
         if (make_lvars)
-            var = new_lvar(decl_name);
+            var = new_lvar(decl_name, ty);
         if (consume("=")) {
             node* init = initializer();
             if (var && init->kind != ND_NULL) {
                 node* lhs = new_node(ND_VAR);
                 lhs->var = var;
+                lhs->ty = var->ty;
                 tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
                 tail = tail->next;
             }
@@ -720,10 +820,11 @@ obj* param_list(void)
     }
 
     for (;;) {
-        type_spec();
+        type* base_ty = type_spec();
         if (!equal(",") && !equal(")")) {
-            token* name = declarator();
-            tail->param_next = new_lvar(name);
+            token* name;
+            type* ty = declarator(base_ty, &name);
+            tail->param_next = new_lvar(name, ty);
             tail = tail->param_next;
         }
 
@@ -901,9 +1002,9 @@ node* primary(void)
 
     if (consume("(")) {
         if (is_type_start()) {
-            type_spec();
+            type* ty = type_spec();
             while (consume("*"))
-                ;
+                ty = pointer_to(ty);
             expect(")");
             return primary();
         }
@@ -987,18 +1088,21 @@ node* unary(void)
 
     if (consume("sizeof")) {
         if (consume("(")) {
+            type* ty = NULL;
             if (is_type_start()) {
-                type_spec();
+                ty = type_spec();
                 while (consume("*"))
-                    ;
+                    ty = pointer_to(ty);
             } else {
-                expr();
+                node* n = expr();
+                expect(")");
+                return new_num(n->ty->size);
             }
             expect(")");
-            return new_num(8);
+            return new_num(ty->size);
         }
-        unary();
-        return new_num(8);
+        node* n = unary();
+        return new_num(n->ty->size);
     }
 
     return postfix();
@@ -1122,12 +1226,13 @@ function* external(void)
         return NULL;
     }
 
-    type_spec();
+    type* base_ty = type_spec();
 
     if (consume(";"))
         return NULL;
 
-    token* name = declarator();
+    token* name;
+    type* ty = declarator(base_ty, &name);
 
     if (consume("(")) {
         locals = NULL;
@@ -1141,13 +1246,14 @@ function* external(void)
 
     if (consume("="))
         initializer();
-    new_gvar(name);
+    new_gvar(name, ty);
 
     while (consume(",")) {
-        token* gname = declarator();
+        token* gname;
+        type* gty = declarator(base_ty, &gname);
         if (consume("="))
             initializer();
-        new_gvar(gname);
+        new_gvar(gname, gty);
     }
 
     expect(";");
@@ -1245,21 +1351,40 @@ int new_label(void)
     return labelseq++;
 }
 
+void mov_imm(char* reg, int val)
+{
+    int lo = val % 65536;
+    int hi = val / 65536;
+    printf("    movz %s, #%d\n", reg, lo);
+    if (val >= 65536)
+        printf("    movk %s, #%d, lsl #16\n", reg, hi);
+}
+
 void emit_func_start(token* name, int stack_size, obj* params)
 {
     emit_global(name);
     emit_label(name);
     printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
     printf("    mov x29, sp                  // establish stack frame\n");
-    if (stack_size)
-        printf("    sub sp, sp, #%d              // allocate locals\n", stack_size);
+    if (stack_size) {
+        mov_imm("x10", stack_size);
+        printf("    sub sp, sp, x10              // allocate locals\n");
+    }
     int i = 0;
     for (obj* var = params; var; var = var->param_next) {
         if (i >= 8) {
             fprintf(stderr, "too many parameters\n");
             exit(1);
         }
-        printf("    str x%d, [x29, #-%d]         // save parameter %s\n", i, var->offset, var->name);
+        mov_imm("x10", var->offset);
+        printf("    sub x9, x29, x10             // address of parameter %s\n", var->name);
+        if (var->ty->size == 1) {
+            printf("    strb w%d, [x9]               // save char parameter\n", i);
+        } else if (var->ty->size == 4) {
+            printf("    str w%d, [x9]                // save int parameter\n", i);
+        } else {
+            printf("    str x%d, [x9]                // save parameter\n", i);
+        }
         i = i + 1;
     }
     printf("    mov w0, #0                   // default return value\n");
@@ -1296,6 +1421,34 @@ void pop(char* reg)
     printf("    ldr %s, [sp], #16            // pop into %s\n", reg, reg);
 }
 
+void load(type* ty)
+{
+    if (ty->kind == TY_ARRAY)
+        return;
+    if (ty->size == 1) {
+        printf("    ldrsb x0, [x0]               // load char\n");
+        return;
+    }
+    if (ty->size == 4) {
+        printf("    ldrsw x0, [x0]               // load int\n");
+        return;
+    }
+    printf("    ldr x0, [x0]                 // load value\n");
+}
+
+void store(type* ty)
+{
+    if (ty->size == 1) {
+        printf("    strb w0, [x1]                // store char\n");
+        return;
+    }
+    if (ty->size == 4) {
+        printf("    str w0, [x1]                 // store int\n");
+        return;
+    }
+    printf("    str x0, [x1]                 // store value\n");
+}
+
 void gen_binary(node* n)
 {
     gen_expr(n->lhs);
@@ -1305,9 +1458,21 @@ void gen_binary(node* n)
 
     switch (n->kind) {
     case ND_ADD:
+        if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
+            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->lhs->ty)->size);
+            printf("    mul x0, x0, x2\n");
+        }
+        if (is_ptrlike(n->rhs->ty) && ptr_base(n->rhs->ty)->size != 1) {
+            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->rhs->ty)->size);
+            printf("    mul x1, x1, x2\n");
+        }
         printf("    add x0, x1, x0               // x0 = lhs + rhs\n");
         return;
     case ND_SUB:
+        if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
+            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->lhs->ty)->size);
+            printf("    mul x0, x0, x2\n");
+        }
         printf("    sub x0, x1, x0               // x0 = lhs - rhs\n");
         return;
     case ND_MUL:
@@ -1383,7 +1548,8 @@ void gen_addr(node* n)
     switch (n->kind) {
     case ND_VAR:
         if (n->var->is_local) {
-            printf("    sub x0, x29, #%d             // address of %s\n", n->var->offset, n->var->name);
+            mov_imm("x10", n->var->offset);
+            printf("    sub x0, x29, x10             // address of %s\n", n->var->name);
             return;
         }
         if (is_std_stream(n->var->name)) {
@@ -1426,21 +1592,22 @@ void gen_expr(node* n)
         return;
     case ND_VAR:
         gen_addr(n);
-        printf("    ldr x0, [x0]                 // load variable\n");
+        if (n->ty->kind != TY_ARRAY)
+            load(n->ty);
         return;
     case ND_ASSIGN:
         gen_addr(n->lhs);
         push();
         gen_expr(n->rhs);
         pop("x1");
-        printf("    str x0, [x1]                 // store variable\n");
+        store(n->lhs->ty);
         return;
     case ND_ADDR:
         gen_addr(n->lhs);
         return;
     case ND_DEREF:
         gen_expr(n->lhs);
-        printf("    ldr x0, [x0]                 // dereference\n");
+        load(n->ty);
         return;
     case ND_FUNCALL:
         gen_funcall(n);
@@ -1560,7 +1727,7 @@ void gen_program(function* prog)
         printf("\n");
         print_name(var->name);
         printf(":\n");
-        printf("    .zero 8\n");
+        printf("    .zero %d\n", var->ty->size);
     }
 
     emit_text();
@@ -1572,6 +1739,11 @@ void gen_program(function* prog)
 int main(void)
 {
     char buf[65536];
+
+    ty_char = new_type(TY_CHAR, 1);
+    ty_int = new_type(TY_INT, 4);
+    ty_long = new_type(TY_LONG, 8);
+    ty_void = new_type(TY_VOID, 1);
 
     add_builtin_type("char");
     add_builtin_type("int");
