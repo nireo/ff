@@ -63,6 +63,10 @@ struct token {
     token* next;
 };
 
+void err(char* s);
+void err_int(int n);
+void err_token(token* tok);
+
 typedef struct member member;
 typedef struct type type;
 struct type {
@@ -202,12 +206,6 @@ int punct_len(char* p)
     if (startswith(p, "&&") || startswith(p, "||") || startswith(p, "->"))
         return 2;
 
-    if (startswith(p, "++") || startswith(p, "--") || startswith(p, "+=") || startswith(p, "-="))
-        return 2;
-
-    if (startswith(p, "*=") || startswith(p, "/=") || startswith(p, "%="))
-        return 2;
-
     return strchr("+-*/%=;(){}[],.&!<>?:", *p) != NULL;
 }
 
@@ -219,101 +217,82 @@ void lex(char* p)
 
     while (*p) {
         if (is_space(*p)) {
-            p++;
-            continue;
-        }
-
-        if (*p == '#') {
+            p = p + 1;
+        } else if (*p == '#') {
             while (*p && *p != '\n')
-                p++;
-            continue;
-        }
-
-        if (startswith(p, "//")) {
-            p += 2;
+                p = p + 1;
+        } else if (startswith(p, "//")) {
+            p = p + 2;
             while (*p && *p != '\n')
-                p++;
-            continue;
-        }
-
-        if (startswith(p, "/*")) {
-            p += 2;
+                p = p + 1;
+        } else if (startswith(p, "/*")) {
+            p = p + 2;
             while (*p && !startswith(p, "*/"))
-                p++;
+                p = p + 1;
             if (*p)
-                p += 2;
-            continue;
-        }
-
-        if (is_digit(*p)) {
+                p = p + 2;
+        } else if (is_digit(*p)) {
             char* start = p;
             int val = 0;
 
             while (is_digit(*p)) {
                 val = val * 10 + (*p - '0');
-                p++;
+                p = p + 1;
             }
 
             token* t = new_token(T_NUM, start, p - start);
             t->val = val;
             tail->next = t;
             tail = t;
-            continue;
-        }
-
-        if (*p == '"') {
-            char* start = p++;
+        } else if (*p == '"') {
+            char* start = p;
+            p = p + 1;
             while (*p && *p != '"') {
                 if (*p == '\\' && p[1])
-                    p++;
-                p++;
+                    p = p + 1;
+                p = p + 1;
             }
             if (*p)
-                p++;
+                p = p + 1;
 
             tail->next = new_token(T_STR, start, p - start);
             tail = tail->next;
-            continue;
-        }
-
-        if (*p == '\'') {
-            char* start = p++;
+        } else if (*p == '\'') {
+            char* start = p;
+            p = p + 1;
             while (*p && *p != '\'') {
                 if (*p == '\\' && p[1])
-                    p++;
-                p++;
+                    p = p + 1;
+                p = p + 1;
             }
             if (*p)
-                p++;
+                p = p + 1;
 
             tail->next = new_token(T_CHAR, start, p - start);
             tail = tail->next;
-            continue;
-        }
-
-        if (is_alpha(*p)) {
+        } else if (is_alpha(*p)) {
             char* start = p;
 
             while (is_ident2(*p))
-                p++;
+                p = p + 1;
 
             token* t = new_token(T_IDENT, start, p - start);
             tail->next = t;
             tail = t;
-            continue;
+        } else {
+            int len = punct_len(p);
+            if (len) {
+                token* t = new_token(T_PUNCT, p, len);
+                tail->next = t;
+                tail = t;
+                p = p + len;
+            } else {
+                err("unknown char: ");
+                fputc(*p, stderr);
+                err("\n");
+                exit(1);
+            }
         }
-
-        int len = punct_len(p);
-        if (len) {
-            token* t = new_token(T_PUNCT, p, len);
-            tail->next = t;
-            tail = t;
-            p += len;
-            continue;
-        }
-
-        fprintf(stderr, "unknown char: %c\n", *p);
-        exit(1);
     }
 
     tail->next = new_token(T_EOF, p, 0);
@@ -438,11 +417,16 @@ void error_at(token* tok, char* msg)
 
     while (p < tok->pt) {
         if (*p == '\n')
-            line++;
-        p++;
+            line = line + 1;
+        p = p + 1;
     }
 
-    fprintf(stderr, "%s at line %d near '%.*s'\n", msg, line, tok->len, tok->pt);
+    err(msg);
+    err(" at line ");
+    err_int(line);
+    err(" near '");
+    err_token(tok);
+    err("'\n");
     exit(1);
 }
 
@@ -468,6 +452,65 @@ char* token_to_str(token* tok)
     memcpy(s, tok->pt, tok->len);
     s[tok->len] = 0;
     return s;
+}
+
+void out(char* s)
+{
+    fputs(s, stdout);
+}
+
+void out_long(long n)
+{
+    if (n < 0) {
+        putchar('-');
+        n = 0 - n;
+    }
+
+    if (n >= 10)
+        out_long(n / 10);
+
+    putchar(n % 10 + '0');
+}
+
+void out_int(int n)
+{
+    out_long(n);
+}
+
+void out_token(token* tok)
+{
+    int i = 0;
+    while (i < tok->len) {
+        putchar(tok->pt[i]);
+        i = i + 1;
+    }
+}
+
+void err(char* s)
+{
+    fputs(s, stderr);
+}
+
+void err_int(int n)
+{
+    if (n < 0) {
+        fputc('-', stderr);
+        n = 0 - n;
+    }
+
+    if (n >= 10)
+        err_int(n / 10);
+
+    fputc(n % 10 + '0', stderr);
+}
+
+void err_token(token* tok)
+{
+    int i = 0;
+    while (i < tok->len) {
+        fputc(tok->pt[i], stderr);
+        i = i + 1;
+    }
 }
 
 node* new_node(int kind)
@@ -638,7 +681,7 @@ obj* new_lvar(token* tok, type* ty)
     var->ty = ty;
     var->is_local = 1;
     stack_offset = align_to(stack_offset, 8);
-    stack_offset += ty->size;
+    stack_offset = stack_offset + ty->size;
     var->offset = stack_offset;
     var->next = locals;
     locals = var;
@@ -976,17 +1019,13 @@ node* compound_after_open(void)
         if (consume("typedef")) {
             tail->next = declaration_rest(1, 0);
             tail = tail->next;
-            continue;
-        }
-
-        if (is_type_start()) {
+        } else if (is_type_start()) {
             tail->next = declaration_rest(0, 1);
             tail = tail->next;
-            continue;
+        } else {
+            tail->next = statement();
+            tail = tail->next;
         }
-
-        tail->next = statement();
-        tail = tail->next;
     }
 
     node* n = new_node(ND_BLOCK);
@@ -1061,28 +1100,8 @@ node* statement(void)
         return n;
     }
 
-    if (consume("switch")) {
-        expect("(");
-        expr();
-        expect(")");
-        return statement();
-    }
-
-    if (consume("case")) {
-        expr();
-        expect(":");
-        return statement();
-    }
-
-    if (consume("default")) {
-        expect(":");
-        return statement();
-    }
-
-    if (consume("break") || consume("continue")) {
-        expect(";");
-        return new_null();
-    }
+    if (equal("switch") || equal("case") || equal("default") || equal("break") || equal("continue"))
+        error_at(cur, "unsupported statement");
 
     if (consume(";"))
         return new_null();
@@ -1150,8 +1169,9 @@ node* primary(void)
 node* postfix(void)
 {
     node* n = primary();
+    int done = 0;
 
-    for (;;) {
+    while (!done) {
         if (consume("(")) {
             node head;
             node* tail = &head;
@@ -1175,32 +1195,21 @@ node* postfix(void)
                 call->ty = find_func_type(n->var->name);
             }
             n = call;
-            continue;
-        }
-
-        if (consume("[")) {
+        } else if (consume("[")) {
             n = new_binary(ND_ADD, n, expr());
             expect("]");
             n = new_unary(ND_DEREF, n);
-            continue;
-        }
-
-        if (consume(".")) {
+        } else if (consume(".")) {
             n = new_member(n, expect_ident());
-            continue;
-        }
-
-        if (consume("->")) {
+        } else if (consume("->")) {
             n = new_unary(ND_DEREF, n);
             n = new_member(n, expect_ident());
-            continue;
+        } else {
+            done = 1;
         }
-
-        if (consume("++") || consume("--"))
-            continue;
-
-        return n;
     }
+
+    return n;
 }
 
 node* unary(void)
@@ -1219,10 +1228,6 @@ node* unary(void)
 
     if (consume("&"))
         return new_unary(ND_ADDR, unary());
-
-    if (consume("++") || consume("--")) {
-        return unary();
-    }
 
     if (consume("sizeof")) {
         if (consume("(")) {
@@ -1253,17 +1258,13 @@ node* mul(void)
     for (;;) {
         if (consume("*")) {
             n = new_binary(ND_MUL, n, unary());
-            continue;
-        }
-        if (consume("/")) {
+        } else if (consume("/")) {
             n = new_binary(ND_DIV, n, unary());
-            continue;
-        }
-        if (consume("%")) {
+        } else if (consume("%")) {
             n = new_binary(ND_MOD, n, unary());
-            continue;
+        } else {
+            return n;
         }
-        return n;
     }
 }
 
@@ -1274,13 +1275,11 @@ node* add(void)
     for (;;) {
         if (consume("+")) {
             n = new_binary(ND_ADD, n, mul());
-            continue;
-        }
-        if (consume("-")) {
+        } else if (consume("-")) {
             n = new_binary(ND_SUB, n, mul());
-            continue;
+        } else {
+            return n;
         }
-        return n;
     }
 }
 
@@ -1291,21 +1290,15 @@ node* relational(void)
     for (;;) {
         if (consume("<")) {
             n = new_binary(ND_LT, n, add());
-            continue;
-        }
-        if (consume(">")) {
+        } else if (consume(">")) {
             n = new_binary(ND_LT, add(), n);
-            continue;
-        }
-        if (consume("<=")) {
+        } else if (consume("<=")) {
             n = new_binary(ND_LE, n, add());
-            continue;
-        }
-        if (consume(">=")) {
+        } else if (consume(">=")) {
             n = new_binary(ND_LE, add(), n);
-            continue;
+        } else {
+            return n;
         }
-        return n;
     }
 }
 
@@ -1316,13 +1309,11 @@ node* equality(void)
     for (;;) {
         if (consume("==")) {
             n = new_binary(ND_EQ, n, relational());
-            continue;
-        }
-        if (consume("!=")) {
+        } else if (consume("!=")) {
             n = new_binary(ND_NE, n, relational());
-            continue;
+        } else {
+            return n;
         }
-        return n;
     }
 }
 
@@ -1346,7 +1337,7 @@ node* assign(void)
 {
     node* n = logical_or();
 
-    if (consume("=") || consume("+=") || consume("-=") || consume("*=") || consume("/=") || consume("%="))
+    if (consume("="))
         n = new_binary(ND_ASSIGN, n, assign());
 
     return n;
@@ -1412,10 +1403,9 @@ function* program(void)
                 tail->next = fn;
                 tail = tail->next;
             }
-            continue;
+        } else {
+            statement();
         }
-
-        statement();
     }
 
     return head.next;
@@ -1432,39 +1422,39 @@ void gen_expr(node* n);
 
 void print_sym(token* tok)
 {
-    printf("_");
-    printf("%.*s", tok->len, tok->pt);
+    out("_");
+    out_token(tok);
 }
 
 void print_name(char* name)
 {
     if (strcmp(name, "stdin") == 0) {
-        printf("___stdinp");
+        out("___stdinp");
         return;
     }
 
     if (strcmp(name, "stdout") == 0) {
-        printf("___stdoutp");
+        out("___stdoutp");
         return;
     }
 
     if (strcmp(name, "stderr") == 0) {
-        printf("___stderrp");
+        out("___stderrp");
         return;
     }
 
-    printf("_");
-    printf("%s", name);
+    out("_");
+    out(name);
 }
 
 void emit_text(void)
 {
-    printf(".text\n");
+    out(".text\n");
 }
 
 void emit_data(void)
 {
-    printf(".data\n");
+    out(".data\n");
 }
 
 int is_std_stream(char* name)
@@ -1474,59 +1464,78 @@ int is_std_stream(char* name)
 
 void emit_global(token* name)
 {
-    printf(".globl ");
+    out(".globl ");
     print_sym(name);
-    printf("\n");
+    out("\n");
 }
 
 void emit_label(token* name)
 {
     print_sym(name);
-    printf(":\n");
+    out(":\n");
 }
 
 int new_label(void)
 {
-    return labelseq++;
+    int label = labelseq;
+    labelseq = labelseq + 1;
+    return label;
 }
 
 void mov_imm(char* reg, int val)
 {
     int lo = val % 65536;
     int hi = val / 65536;
-    printf("    movz %s, #%d\n", reg, lo);
-    if (val >= 65536)
-        printf("    movk %s, #%d, lsl #16\n", reg, hi);
+    out("    movz ");
+    out(reg);
+    out(", #");
+    out_int(lo);
+    out("\n");
+    if (val >= 65536) {
+        out("    movk ");
+        out(reg);
+        out(", #");
+        out_int(hi);
+        out(", lsl #16\n");
+    }
 }
 
 void emit_func_start(token* name, int stack_size, obj* params)
 {
     emit_global(name);
     emit_label(name);
-    printf("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
-    printf("    mov x29, sp                  // establish stack frame\n");
+    out("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
+    out("    mov x29, sp                  // establish stack frame\n");
     if (stack_size) {
         mov_imm("x10", stack_size);
-        printf("    sub sp, sp, x10              // allocate locals\n");
+        out("    sub sp, sp, x10              // allocate locals\n");
     }
     int i = 0;
     for (obj* var = params; var; var = var->param_next) {
         if (i >= 8) {
-            fprintf(stderr, "too many parameters\n");
+            err("too many parameters\n");
             exit(1);
         }
         mov_imm("x10", var->offset);
-        printf("    sub x9, x29, x10             // address of parameter %s\n", var->name);
+        out("    sub x9, x29, x10             // address of parameter ");
+        out(var->name);
+        out("\n");
         if (var->ty->size == 1) {
-            printf("    strb w%d, [x9]               // save char parameter\n", i);
+            out("    strb w");
+            out_int(i);
+            out(", [x9]               // save char parameter\n");
         } else if (var->ty->size == 4) {
-            printf("    str w%d, [x9]                // save int parameter\n", i);
+            out("    str w");
+            out_int(i);
+            out(", [x9]                // save int parameter\n");
         } else {
-            printf("    str x%d, [x9]                // save parameter\n", i);
+            out("    str x");
+            out_int(i);
+            out(", [x9]                // save parameter\n");
         }
         i = i + 1;
     }
-    printf("    mov w0, #0                   // default return value\n");
+    out("    mov w0, #0                   // default return value\n");
 }
 
 void emit_return(void)
@@ -1534,30 +1543,40 @@ void emit_return(void)
     if (current_return_label < 0)
         return;
 
-    printf("    b .L.return.%d               // return\n", current_return_label);
+    out("    b .L.return.");
+    out_int(current_return_label);
+    out("               // return\n");
 }
 
 void emit_imm(long val)
 {
-    printf("    mov x0, #%ld                 // load immediate\n", val);
+    out("    mov x0, #");
+    out_long(val);
+    out("                 // load immediate\n");
 }
 
 void emit_func_end(int label)
 {
-    printf(".L.return.%d:\n", label);
-    printf("    mov sp, x29                  // release locals\n");
-    printf("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
-    printf("    ret                          // return to caller\n");
+    out(".L.return.");
+    out_int(label);
+    out(":\n");
+    out("    mov sp, x29                  // release locals\n");
+    out("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
+    out("    ret                          // return to caller\n");
 }
 
 void push(void)
 {
-    printf("    str x0, [sp, #-16]!          // push x0\n");
+    out("    str x0, [sp, #-16]!          // push x0\n");
 }
 
 void pop(char* reg)
 {
-    printf("    ldr %s, [sp], #16            // pop into %s\n", reg, reg);
+    out("    ldr ");
+    out(reg);
+    out(", [sp], #16            // pop into ");
+    out(reg);
+    out("\n");
 }
 
 void load(type* ty)
@@ -1565,27 +1584,27 @@ void load(type* ty)
     if (ty->kind == TY_ARRAY)
         return;
     if (ty->size == 1) {
-        printf("    ldrsb x0, [x0]               // load char\n");
+        out("    ldrsb x0, [x0]               // load char\n");
         return;
     }
     if (ty->size == 4) {
-        printf("    ldrsw x0, [x0]               // load int\n");
+        out("    ldrsw x0, [x0]               // load int\n");
         return;
     }
-    printf("    ldr x0, [x0]                 // load value\n");
+    out("    ldr x0, [x0]                 // load value\n");
 }
 
 void store(type* ty)
 {
     if (ty->size == 1) {
-        printf("    strb w0, [x1]                // store char\n");
+        out("    strb w0, [x1]                // store char\n");
         return;
     }
     if (ty->size == 4) {
-        printf("    str w0, [x1]                 // store int\n");
+        out("    str w0, [x1]                 // store int\n");
         return;
     }
-    printf("    str x0, [x1]                 // store value\n");
+    out("    str x0, [x1]                 // store value\n");
 }
 
 void gen_binary(node* n)
@@ -1595,64 +1614,89 @@ void gen_binary(node* n)
     gen_expr(n->rhs);
     pop("x1");
 
-    switch (n->kind) {
-    case ND_ADD:
+    if (n->kind == ND_ADD) {
         if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
-            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->lhs->ty)->size);
-            printf("    mul x0, x0, x2\n");
+            out("    mov x2, #");
+            out_int(ptr_base(n->lhs->ty)->size);
+            out("                  // pointer scale\n");
+            out("    mul x0, x0, x2\n");
         }
         if (is_ptrlike(n->rhs->ty) && ptr_base(n->rhs->ty)->size != 1) {
-            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->rhs->ty)->size);
-            printf("    mul x1, x1, x2\n");
+            out("    mov x2, #");
+            out_int(ptr_base(n->rhs->ty)->size);
+            out("                  // pointer scale\n");
+            out("    mul x1, x1, x2\n");
         }
-        printf("    add x0, x1, x0               // x0 = lhs + rhs\n");
+        out("    add x0, x1, x0               // x0 = lhs + rhs\n");
         return;
-    case ND_SUB:
+    }
+
+    if (n->kind == ND_SUB) {
         if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
-            printf("    mov x2, #%d                  // pointer scale\n", ptr_base(n->lhs->ty)->size);
-            printf("    mul x0, x0, x2\n");
+            out("    mov x2, #");
+            out_int(ptr_base(n->lhs->ty)->size);
+            out("                  // pointer scale\n");
+            out("    mul x0, x0, x2\n");
         }
-        printf("    sub x0, x1, x0               // x0 = lhs - rhs\n");
+        out("    sub x0, x1, x0               // x0 = lhs - rhs\n");
         return;
-    case ND_MUL:
-        printf("    mul x0, x1, x0               // x0 = lhs * rhs\n");
+    }
+
+    if (n->kind == ND_MUL) {
+        out("    mul x0, x1, x0               // x0 = lhs * rhs\n");
         return;
-    case ND_DIV:
-        printf("    sdiv x0, x1, x0              // x0 = lhs / rhs\n");
+    }
+
+    if (n->kind == ND_DIV) {
+        out("    sdiv x0, x1, x0              // x0 = lhs / rhs\n");
         return;
-    case ND_MOD:
-        printf("    sdiv x2, x1, x0              // x2 = lhs / rhs\n");
-        printf("    msub x0, x2, x0, x1          // x0 = lhs %% rhs\n");
+    }
+
+    if (n->kind == ND_MOD) {
+        out("    sdiv x2, x1, x0              // x2 = lhs / rhs\n");
+        out("    msub x0, x2, x0, x1          // x0 = lhs % rhs\n");
         return;
-    case ND_EQ:
-        printf("    cmp x1, x0                   // compare lhs == rhs\n");
-        printf("    cset w0, eq                  // x0 = comparison result\n");
+    }
+
+    if (n->kind == ND_EQ) {
+        out("    cmp x1, x0                   // compare lhs == rhs\n");
+        out("    cset w0, eq                  // x0 = comparison result\n");
         return;
-    case ND_NE:
-        printf("    cmp x1, x0                   // compare lhs != rhs\n");
-        printf("    cset w0, ne                  // x0 = comparison result\n");
+    }
+
+    if (n->kind == ND_NE) {
+        out("    cmp x1, x0                   // compare lhs != rhs\n");
+        out("    cset w0, ne                  // x0 = comparison result\n");
         return;
-    case ND_LT:
-        printf("    cmp x1, x0                   // compare lhs < rhs\n");
-        printf("    cset w0, lt                  // x0 = comparison result\n");
+    }
+
+    if (n->kind == ND_LT) {
+        out("    cmp x1, x0                   // compare lhs < rhs\n");
+        out("    cset w0, lt                  // x0 = comparison result\n");
         return;
-    case ND_LE:
-        printf("    cmp x1, x0                   // compare lhs <= rhs\n");
-        printf("    cset w0, le                  // x0 = comparison result\n");
+    }
+
+    if (n->kind == ND_LE) {
+        out("    cmp x1, x0                   // compare lhs <= rhs\n");
+        out("    cset w0, le                  // x0 = comparison result\n");
         return;
-    case ND_LOGAND:
-        printf("    cmp x1, #0                   // lhs != 0\n");
-        printf("    cset w1, ne\n");
-        printf("    cmp x0, #0                   // rhs != 0\n");
-        printf("    cset w0, ne\n");
-        printf("    and w0, w1, w0               // x0 = lhs && rhs\n");
+    }
+
+    if (n->kind == ND_LOGAND) {
+        out("    cmp x1, #0                   // lhs != 0\n");
+        out("    cset w1, ne\n");
+        out("    cmp x0, #0                   // rhs != 0\n");
+        out("    cset w0, ne\n");
+        out("    and w0, w1, w0               // x0 = lhs && rhs\n");
         return;
-    case ND_LOGOR:
-        printf("    cmp x1, #0                   // lhs != 0\n");
-        printf("    cset w1, ne\n");
-        printf("    cmp x0, #0                   // rhs != 0\n");
-        printf("    cset w0, ne\n");
-        printf("    orr w0, w1, w0               // x0 = lhs || rhs\n");
+    }
+
+    if (n->kind == ND_LOGOR) {
+        out("    cmp x1, #0                   // lhs != 0\n");
+        out("    cset w1, ne\n");
+        out("    cmp x0, #0                   // rhs != 0\n");
+        out("    cset w0, ne\n");
+        out("    orr w0, w1, w0               // x0 = lhs || rhs\n");
         return;
     }
 }
@@ -1663,7 +1707,7 @@ void gen_funcall(node* n)
 
     for (node* arg = n->args; arg; arg = arg->next) {
         if (nargs >= 8) {
-            fprintf(stderr, "too many arguments\n");
+            err("too many arguments\n");
             exit(1);
         }
         gen_expr(arg);
@@ -1679,48 +1723,61 @@ void gen_funcall(node* n)
         pop(reg);
     }
 
-    printf("    bl _%s                       // call function\n", n->funcname);
+    out("    bl _");
+    out(n->funcname);
+    out("                       // call function\n");
 }
 
 void gen_addr(node* n)
 {
-    switch (n->kind) {
-    case ND_VAR:
+    if (n->kind == ND_VAR) {
         if (n->var->is_local) {
             mov_imm("x10", n->var->offset);
-            printf("    sub x0, x29, x10             // address of %s\n", n->var->name);
+            out("    sub x0, x29, x10             // address of ");
+            out(n->var->name);
+            out("\n");
             return;
         }
         if (is_std_stream(n->var->name)) {
-            printf("    adrp x0, ");
+            out("    adrp x0, ");
             print_name(n->var->name);
-            printf("@GOTPAGE          // address of external global %s\n", n->var->name);
-            printf("    ldr x0, [x0, ");
+            out("@GOTPAGE          // address of external global ");
+            out(n->var->name);
+            out("\n");
+            out("    ldr x0, [x0, ");
             print_name(n->var->name);
-            printf("@GOTPAGEOFF]\n");
+            out("@GOTPAGEOFF]\n");
             return;
         }
-        printf("    adrp x0, ");
+        out("    adrp x0, ");
         print_name(n->var->name);
-        printf("@PAGE              // address of global %s\n", n->var->name);
-        printf("    add x0, x0, ");
+        out("@PAGE              // address of global ");
+        out(n->var->name);
+        out("\n");
+        out("    add x0, x0, ");
         print_name(n->var->name);
-        printf("@PAGEOFF\n");
+        out("@PAGEOFF\n");
         return;
-    case ND_DEREF:
+    }
+
+    if (n->kind == ND_DEREF) {
         gen_expr(n->lhs);
         return;
-    case ND_MEMBER:
+    }
+
+    if (n->kind == ND_MEMBER) {
         gen_addr(n->lhs);
         if (n->mem->offset) {
             mov_imm("x10", n->mem->offset);
-            printf("    add x0, x0, x10             // address of member %s\n", n->mem->name);
+            out("    add x0, x0, x10             // address of member ");
+            out(n->mem->name);
+            out("\n");
         }
         return;
-    default:
-        fprintf(stderr, "not an lvalue\n");
-        exit(1);
     }
+
+    err("not an lvalue\n");
+    exit(1);
 }
 
 void gen_expr(node* n)
@@ -1728,60 +1785,68 @@ void gen_expr(node* n)
     if (!n)
         return;
 
-    switch (n->kind) {
-    case ND_NUM:
+    if (n->kind == ND_NUM) {
         emit_imm(n->val);
         return;
-    case ND_STR:
-        printf("    adrp x0, .L.str.%d@PAGE      // address of string literal\n", n->str_label);
-        printf("    add x0, x0, .L.str.%d@PAGEOFF\n", n->str_label);
+    }
+
+    if (n->kind == ND_STR) {
+        out("    adrp x0, .L.str.");
+        out_int(n->str_label);
+        out("@PAGE      // address of string literal\n");
+        out("    add x0, x0, .L.str.");
+        out_int(n->str_label);
+        out("@PAGEOFF\n");
         return;
-    case ND_VAR:
+    }
+
+    if (n->kind == ND_VAR) {
         gen_addr(n);
         if (n->ty->kind != TY_ARRAY)
             load(n->ty);
         return;
-    case ND_MEMBER:
+    }
+
+    if (n->kind == ND_MEMBER) {
         gen_addr(n);
         load(n->ty);
         return;
-    case ND_ASSIGN:
+    }
+
+    if (n->kind == ND_ASSIGN) {
         gen_addr(n->lhs);
         push();
         gen_expr(n->rhs);
         pop("x1");
         store(n->lhs->ty);
         return;
-    case ND_ADDR:
+    }
+
+    if (n->kind == ND_ADDR) {
         gen_addr(n->lhs);
         return;
-    case ND_DEREF:
+    }
+
+    if (n->kind == ND_DEREF) {
         gen_expr(n->lhs);
         load(n->ty);
         return;
-    case ND_FUNCALL:
+    }
+
+    if (n->kind == ND_FUNCALL) {
         gen_funcall(n);
         return;
-    case ND_ADD:
-    case ND_SUB:
-    case ND_MUL:
-    case ND_DIV:
-    case ND_MOD:
-    case ND_EQ:
-    case ND_NE:
-    case ND_LT:
-    case ND_LE:
-    case ND_LOGAND:
-    case ND_LOGOR:
+    }
+
+    if (n->kind == ND_ADD || n->kind == ND_SUB || n->kind == ND_MUL || n->kind == ND_DIV || n->kind == ND_MOD || n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE || n->kind == ND_LOGAND || n->kind == ND_LOGOR) {
         gen_binary(n);
         return;
-    case ND_NOT:
-        gen_expr(n->lhs);
-        printf("    cmp x0, #0                   // logical not\n");
-        printf("    cset w0, eq                  // x0 = !x0\n");
-        return;
+    }
 
-    default:
+    if (n->kind == ND_NOT) {
+        gen_expr(n->lhs);
+        out("    cmp x0, #0                   // logical not\n");
+        out("    cset w0, eq                  // x0 = !x0\n");
         return;
     }
 }
@@ -1791,65 +1856,82 @@ void gen_stmt(node* n)
     if (!n)
         return;
 
-    switch (n->kind) {
-    case ND_NULL:
+    if (n->kind == ND_NULL)
         return;
 
-    case ND_BLOCK:
+    if (n->kind == ND_BLOCK) {
         for (node* stmt = n->body; stmt; stmt = stmt->next)
             gen_stmt(stmt);
         return;
+    }
 
-    case ND_RETURN:
+    if (n->kind == ND_RETURN) {
         gen_expr(n->lhs);
         emit_return();
         return;
+    }
 
-    case ND_EXPR_STMT:
+    if (n->kind == ND_EXPR_STMT) {
         gen_expr(n->lhs);
-        return;
-
-    case ND_IF:
-    {
-        int label = new_label();
-        gen_expr(n->cond);
-        printf("    cmp x0, #0                   // if condition\n");
-        if (n->els) {
-            printf("    beq .L.else.%d\n", label);
-            gen_stmt(n->then);
-            printf("    b .L.end.%d\n", label);
-            printf(".L.else.%d:\n", label);
-            gen_stmt(n->els);
-            printf(".L.end.%d:\n", label);
-            return;
-        }
-        printf("    beq .L.end.%d\n", label);
-        gen_stmt(n->then);
-        printf(".L.end.%d:\n", label);
         return;
     }
 
-    case ND_FOR:
-    {
+    if (n->kind == ND_IF) {
+        int label = new_label();
+        gen_expr(n->cond);
+        out("    cmp x0, #0                   // if condition\n");
+        if (n->els) {
+            out("    beq .L.else.");
+            out_int(label);
+            out("\n");
+            gen_stmt(n->then);
+            out("    b .L.end.");
+            out_int(label);
+            out("\n");
+            out(".L.else.");
+            out_int(label);
+            out(":\n");
+            gen_stmt(n->els);
+            out(".L.end.");
+            out_int(label);
+            out(":\n");
+            return;
+        }
+        out("    beq .L.end.");
+        out_int(label);
+        out("\n");
+        gen_stmt(n->then);
+        out(".L.end.");
+        out_int(label);
+        out(":\n");
+        return;
+    }
+
+    if (n->kind == ND_FOR) {
         int label = new_label();
         gen_stmt(n->init);
-        printf(".L.begin.%d:\n", label);
+        out(".L.begin.");
+        out_int(label);
+        out(":\n");
         if (n->cond) {
             gen_expr(n->cond);
-            printf("    cmp x0, #0                   // loop condition\n");
-            printf("    beq .L.end.%d\n", label);
+            out("    cmp x0, #0                   // loop condition\n");
+            out("    beq .L.end.");
+            out_int(label);
+            out("\n");
         }
         gen_stmt(n->then);
         gen_expr(n->inc);
-        printf("    b .L.begin.%d\n", label);
-        printf(".L.end.%d:\n", label);
+        out("    b .L.begin.");
+        out_int(label);
+        out("\n");
+        out(".L.end.");
+        out_int(label);
+        out(":\n");
         return;
     }
 
-    default:
-        gen_expr(n);
-        return;
-    }
+    gen_expr(n);
 }
 
 void gen_function(function* fn)
@@ -1867,17 +1949,23 @@ void gen_program(function* prog)
     emit_data();
 
     for (string_lit* s = strings; s; s = s->next) {
-        printf(".L.str.%d:\n", s->label);
-        printf("    .asciz %.*s\n", s->tok->len, s->tok->pt);
+        out(".L.str.");
+        out_int(s->label);
+        out(":\n");
+        out("    .asciz ");
+        out_token(s->tok);
+        out("\n");
     }
 
     for (obj* var = globals; var; var = var->next) {
-        printf(".globl ");
+        out(".globl ");
         print_name(var->name);
-        printf("\n");
+        out("\n");
         print_name(var->name);
-        printf(":\n");
-        printf("    .zero %d\n", var->ty->size);
+        out(":\n");
+        out("    .zero ");
+        out_int(var->ty->size);
+        out("\n");
     }
 
     emit_text();
