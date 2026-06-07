@@ -41,6 +41,7 @@ enum {
     ND_DEREF,
     ND_NOT,
     ND_STR,
+    ND_MEMBER,
 };
 
 enum {
@@ -62,12 +63,21 @@ struct token {
     token* next;
 };
 
+typedef struct member member;
 typedef struct type type;
 struct type {
     int kind;
     int size;
     int array_len;
     type* base;
+    member* members;
+};
+
+struct member {
+    char* name;
+    type* ty;
+    int offset;
+    member* next;
 };
 
 typedef struct obj obj;
@@ -108,6 +118,7 @@ struct node {
     char* funcname;
     int str_label;
     token* str_tok;
+    member* mem;
 };
 
 typedef struct function function;
@@ -125,6 +136,7 @@ struct name {
     char* pt;
     int len;
     int val;
+    type* ty;
     name* next;
 };
 
@@ -314,8 +326,10 @@ void lex(char* p)
  */
 
 name* type_names;
+name* struct_tags;
 name* enum_consts;
 obj* globals;
+obj* funcs;
 obj* locals;
 int stack_offset;
 string_lit* strings;
@@ -364,6 +378,38 @@ type* ptr_base(type* ty)
     if (ty && ty->base)
         return ty->base;
     return ty_char;
+}
+
+int same(token* tok, char* s);
+void error_at(token* tok, char* msg);
+
+name* find_name(name* list, token* tok)
+{
+    name* n = list;
+
+    while (n) {
+        if (tok->len == n->len && strncmp(tok->pt, n->pt, tok->len) == 0)
+            return n;
+        n = n->next;
+    }
+
+    return NULL;
+}
+
+member* find_member(type* ty, token* tok)
+{
+    if (!ty || ty->kind != TY_STRUCT)
+        error_at(tok, "not a struct");
+
+    member* mem = ty->members;
+    while (mem) {
+        if (same(tok, mem->name))
+            return mem;
+        mem = mem->next;
+    }
+
+    error_at(tok, "no such member");
+    return NULL;
 }
 
 int same(token* tok, char* s)
@@ -508,6 +554,14 @@ int char_val(token* tok)
     return *p;
 }
 
+node* new_member(node* lhs, token* name)
+{
+    node* n = new_unary(ND_MEMBER, lhs);
+    n->mem = find_member(lhs->ty, name);
+    n->ty = n->mem->ty;
+    return n;
+}
+
 node* new_var(token* tok)
 {
     node* n = new_node(ND_VAR);
@@ -549,6 +603,33 @@ obj* new_gvar(token* tok, type* ty)
     return var;
 }
 
+obj* new_func_symbol(token* tok, type* ty)
+{
+    obj* fn = malloc(sizeof(obj));
+    memset(fn, 0, sizeof(obj));
+    fn->name = token_to_str(tok);
+    fn->ty = ty;
+    fn->next = funcs;
+    funcs = fn;
+    return fn;
+}
+
+type* find_func_type(char* name)
+{
+    for (obj* fn = funcs; fn; fn = fn->next) {
+        if (strcmp(fn->name, name) == 0)
+            return fn->ty;
+    }
+
+    return ty_long;
+}
+
+type* find_func_type_token(token* tok)
+{
+    char* name = token_to_str(tok);
+    return find_func_type(name);
+}
+
 obj* new_lvar(token* tok, type* ty)
 {
     obj* var = malloc(sizeof(obj));
@@ -581,14 +662,29 @@ function* new_function(token* name, obj* params, node* body)
     return fn;
 }
 
-void add_type_name(token* tok)
+void add_type_name(token* tok, type* ty)
 {
     name* n = malloc(sizeof(name));
     n->pt = tok->pt;
     n->len = tok->len;
     n->val = 0;
+    n->ty = ty;
     n->next = type_names;
     type_names = n;
+}
+
+void add_struct_tag(token* tok, type* ty)
+{
+    name* n = find_name(struct_tags, tok);
+    if (!n) {
+        n = malloc(sizeof(name));
+        n->pt = tok->pt;
+        n->len = tok->len;
+        n->val = 0;
+        n->next = struct_tags;
+        struct_tags = n;
+    }
+    n->ty = ty;
 }
 
 void add_enum_const(token* tok, int val)
@@ -597,42 +693,27 @@ void add_enum_const(token* tok, int val)
     n->pt = tok->pt;
     n->len = tok->len;
     n->val = val;
+    n->ty = ty_int;
     n->next = enum_consts;
     enum_consts = n;
 }
 
 name* find_enum_const(token* tok)
 {
-    name* n = enum_consts;
-
-    while (n) {
-        if (tok->len == n->len && strncmp(tok->pt, n->pt, tok->len) == 0)
-            return n;
-        n = n->next;
-    }
-
-    return NULL;
+    return find_name(enum_consts, tok);
 }
 
-void add_builtin_type(char* s)
+void add_builtin_type(char* s, type* ty)
 {
     token tok;
     tok.pt = s;
     tok.len = strlen(s);
-    add_type_name(&tok);
+    add_type_name(&tok, ty);
 }
 
 int is_type_name(token* tok)
 {
-    name* n = type_names;
-
-    while (n) {
-        if (tok->len == n->len && strncmp(tok->pt, n->pt, tok->len) == 0)
-            return 1;
-        n = n->next;
-    }
-
-    return 0;
+    return find_name(type_names, tok) != NULL;
 }
 
 int is_type_start(void)
@@ -643,6 +724,7 @@ int is_type_start(void)
 node* expr(void);
 node* declaration_rest(int is_typedef, int make_lvars);
 node* statement(void);
+type* declarator(type* ty, token** name);
 
 void enum_spec(void)
 {
@@ -671,14 +753,71 @@ void enum_spec(void)
 type* type_spec(void)
 {
     if (consume("struct")) {
-        if (cur->ty == T_IDENT)
+        token* tag = NULL;
+        type* ty = NULL;
+
+        if (cur->ty == T_IDENT) {
+            tag = cur;
+            name* n = find_name(struct_tags, tag);
+            if (n)
+                ty = n->ty;
             cur = cur->next;
+        }
+
+        if (!ty)
+            ty = new_type(TY_STRUCT, 0);
+
+        if (tag)
+            add_struct_tag(tag, ty);
 
         if (consume("{")) {
-            while (!consume("}"))
-                declaration_rest(0, 0);
+            member head;
+            member* tail = &head;
+            int offset = 0;
+            head.next = NULL;
+
+            while (!consume("}")) {
+                type* base_ty = type_spec();
+                token* name;
+                type* mem_ty = declarator(base_ty, &name);
+
+                int align = mem_ty->size;
+                if (align > 8)
+                    align = 8;
+                offset = align_to(offset, align);
+                member* mem = malloc(sizeof(member));
+                memset(mem, 0, sizeof(member));
+                mem->name = token_to_str(name);
+                mem->ty = mem_ty;
+                mem->offset = offset;
+                tail->next = mem;
+                tail = mem;
+                offset = offset + mem_ty->size;
+
+                while (consume(",")) {
+                    mem_ty = declarator(base_ty, &name);
+                    align = mem_ty->size;
+                    if (align > 8)
+                        align = 8;
+                    offset = align_to(offset, align);
+                    mem = malloc(sizeof(member));
+                    memset(mem, 0, sizeof(member));
+                    mem->name = token_to_str(name);
+                    mem->ty = mem_ty;
+                    mem->offset = offset;
+                    tail->next = mem;
+                    tail = mem;
+                    offset = offset + mem_ty->size;
+                }
+
+                expect(";");
+            }
+
+            ty->members = head.next;
+            ty->size = align_to(offset, 8);
         }
-        return new_type(TY_STRUCT, 8);
+
+        return ty;
     }
 
     if (equal("enum")) {
@@ -687,17 +826,7 @@ type* type_spec(void)
     }
 
     if (cur->ty == T_IDENT && is_type_name(cur)) {
-        type* ty = ty_long;
-        if (same(cur, "char"))
-            ty = ty_char;
-        if (same(cur, "int"))
-            ty = ty_int;
-        if (same(cur, "long"))
-            ty = ty_long;
-        if (same(cur, "void"))
-            ty = ty_void;
-        if (same(cur, "size_t"))
-            ty = ty_long;
+        type* ty = find_name(type_names, cur)->ty;
         cur = cur->next;
         return ty;
     }
@@ -759,7 +888,7 @@ node* declaration_rest(int is_typedef, int make_lvars)
     token* decl_name;
     type* ty = declarator(base_ty, &decl_name);
     if (is_typedef)
-        add_type_name(decl_name);
+        add_type_name(decl_name, ty);
     obj* var = NULL;
     if (make_lvars)
         var = new_lvar(decl_name, ty);
@@ -778,7 +907,7 @@ node* declaration_rest(int is_typedef, int make_lvars)
     while (consume(",")) {
         ty = declarator(base_ty, &decl_name);
         if (is_typedef)
-            add_type_name(decl_name);
+            add_type_name(decl_name, ty);
         var = NULL;
         if (make_lvars)
             var = new_lvar(decl_name, ty);
@@ -1040,8 +1169,11 @@ node* postfix(void)
 
             node* call = new_node(ND_FUNCALL);
             call->args = head.next;
-            if (n->kind == ND_VAR)
+            call->ty = ty_long;
+            if (n->kind == ND_VAR) {
                 call->funcname = n->var->name;
+                call->ty = find_func_type(n->var->name);
+            }
             n = call;
             continue;
         }
@@ -1053,8 +1185,14 @@ node* postfix(void)
             continue;
         }
 
-        if (consume(".") || consume("->")) {
-            expect_ident();
+        if (consume(".")) {
+            n = new_member(n, expect_ident());
+            continue;
+        }
+
+        if (consume("->")) {
+            n = new_unary(ND_DEREF, n);
+            n = new_member(n, expect_ident());
             continue;
         }
 
@@ -1235,6 +1373,7 @@ function* external(void)
     type* ty = declarator(base_ty, &name);
 
     if (consume("(")) {
+        new_func_symbol(name, ty);
         locals = NULL;
         stack_offset = 0;
         obj* params = param_list();
@@ -1571,6 +1710,13 @@ void gen_addr(node* n)
     case ND_DEREF:
         gen_expr(n->lhs);
         return;
+    case ND_MEMBER:
+        gen_addr(n->lhs);
+        if (n->mem->offset) {
+            mov_imm("x10", n->mem->offset);
+            printf("    add x0, x0, x10             // address of member %s\n", n->mem->name);
+        }
+        return;
     default:
         fprintf(stderr, "not an lvalue\n");
         exit(1);
@@ -1594,6 +1740,10 @@ void gen_expr(node* n)
         gen_addr(n);
         if (n->ty->kind != TY_ARRAY)
             load(n->ty);
+        return;
+    case ND_MEMBER:
+        gen_addr(n);
+        load(n->ty);
         return;
     case ND_ASSIGN:
         gen_addr(n->lhs);
@@ -1745,11 +1895,11 @@ int main(void)
     ty_long = new_type(TY_LONG, 8);
     ty_void = new_type(TY_VOID, 1);
 
-    add_builtin_type("char");
-    add_builtin_type("int");
-    add_builtin_type("long");
-    add_builtin_type("void");
-    add_builtin_type("size_t");
+    add_builtin_type("char", ty_char);
+    add_builtin_type("int", ty_int);
+    add_builtin_type("long", ty_long);
+    add_builtin_type("void", ty_void);
+    add_builtin_type("size_t", ty_long);
 
     size_t n = fread(buf, 1, sizeof(buf) - 1, stdin);
 
