@@ -189,12 +189,10 @@ int is_space(char c)
 
 token* new_token(int ty, char* pt, int len)
 {
-    token* t = malloc(sizeof(token));
+    token* t = calloc(1, sizeof(token));
     t->ty = ty;
     t->pt = pt;
     t->len = len;
-    t->val = 0;
-    t->next = NULL;
     return t;
 }
 
@@ -325,8 +323,7 @@ int align_to(int n, int align)
 
 type* new_type(int kind, int size)
 {
-    type* ty = malloc(sizeof(type));
-    memset(ty, 0, sizeof(type));
+    type* ty = calloc(1, sizeof(type));
     ty->kind = kind;
     ty->size = size;
     return ty;
@@ -361,6 +358,7 @@ type* ptr_base(type* ty)
 
 int same(token* tok, char* s);
 void error_at(token* tok, char* msg);
+char* token_to_str(token* tok);
 
 name* find_name(name* list, token* tok)
 {
@@ -373,6 +371,23 @@ name* find_name(name* list, token* tok)
     }
 
     return NULL;
+}
+
+name* new_name(token* tok)
+{
+    name* n = calloc(1, sizeof(name));
+    n->pt = tok->pt;
+    n->len = tok->len;
+    return n;
+}
+
+member* new_struct_member(token* name, type* ty, int offset)
+{
+    member* mem = calloc(1, sizeof(member));
+    mem->name = token_to_str(name);
+    mem->ty = ty;
+    mem->offset = offset;
+    return mem;
 }
 
 member* find_member(type* ty, token* tok)
@@ -472,9 +487,18 @@ void out_long(long n)
     putchar(n % 10 + '0');
 }
 
-void out_int(int n)
+void outi(char* a, int n, char* b)
 {
+    out(a);
     out_long(n);
+    out(b);
+}
+
+void outs(char* a, char* s, char* b)
+{
+    out(a);
+    out(s);
+    out(b);
 }
 
 void out_token(token* tok)
@@ -484,6 +508,13 @@ void out_token(token* tok)
         putchar(tok->pt[i]);
         i = i + 1;
     }
+}
+
+void outt(char* a, token* tok, char* b)
+{
+    out(a);
+    out_token(tok);
+    out(b);
 }
 
 void err(char* s)
@@ -515,8 +546,7 @@ void err_token(token* tok)
 
 node* new_node(int kind)
 {
-    node* n = malloc(sizeof(node));
-    memset(n, 0, sizeof(node));
+    node* n = calloc(1, sizeof(node));
     n->kind = kind;
     return n;
 }
@@ -560,7 +590,7 @@ node* new_num(long val)
 
 node* new_string(token* tok)
 {
-    string_lit* s = malloc(sizeof(string_lit));
+    string_lit* s = calloc(1, sizeof(string_lit));
     s->label = string_labelseq;
     string_labelseq = string_labelseq + 1;
     s->tok = tok;
@@ -605,42 +635,44 @@ node* new_member(node* lhs, token* name)
     return n;
 }
 
+obj* new_obj(token* tok, type* ty)
+{
+    obj* var = calloc(1, sizeof(obj));
+    var->name = token_to_str(tok);
+    var->ty = ty;
+    return var;
+}
+
+obj* find_obj(obj* list, char* name)
+{
+    for (obj* var = list; var; var = var->next) {
+        if (strcmp(var->name, name) == 0)
+            return var;
+    }
+    return NULL;
+}
+
+node* new_var_node(obj* var);
+
 node* new_var(token* tok)
 {
-    node* n = new_node(ND_VAR);
     char* name = token_to_str(tok);
+    obj* var = find_obj(locals, name);
 
-    for (obj* var = locals; var; var = var->next) {
-        if (strcmp(var->name, name) == 0) {
-            n->var = var;
-            n->ty = var->ty;
-            return n;
-        }
+    if (!var)
+        var = find_obj(globals, name);
+
+    if (!var) {
+        var = calloc(1, sizeof(obj));
+        var->name = name;
+        var->ty = ty_long;
     }
-
-    for (obj* var = globals; var; var = var->next) {
-        if (strcmp(var->name, name) == 0) {
-            n->var = var;
-            n->ty = var->ty;
-            return n;
-        }
-    }
-
-    obj* var = malloc(sizeof(obj));
-    memset(var, 0, sizeof(obj));
-    var->name = name;
-    var->ty = ty_long;
-    n->var = var;
-    n->ty = var->ty;
-    return n;
+    return new_var_node(var);
 }
 
 obj* new_gvar(token* tok, type* ty)
 {
-    obj* var = malloc(sizeof(obj));
-    memset(var, 0, sizeof(obj));
-    var->name = token_to_str(tok);
-    var->ty = ty;
+    obj* var = new_obj(tok, ty);
     var->next = globals;
     globals = var;
     return var;
@@ -648,10 +680,7 @@ obj* new_gvar(token* tok, type* ty)
 
 obj* new_func_symbol(token* tok, type* ty)
 {
-    obj* fn = malloc(sizeof(obj));
-    memset(fn, 0, sizeof(obj));
-    fn->name = token_to_str(tok);
-    fn->ty = ty;
+    obj* fn = new_obj(tok, ty);
     fn->next = funcs;
     funcs = fn;
     return fn;
@@ -659,26 +688,15 @@ obj* new_func_symbol(token* tok, type* ty)
 
 type* find_func_type(char* name)
 {
-    for (obj* fn = funcs; fn; fn = fn->next) {
-        if (strcmp(fn->name, name) == 0)
-            return fn->ty;
-    }
-
+    obj* fn = find_obj(funcs, name);
+    if (fn)
+        return fn->ty;
     return ty_long;
-}
-
-type* find_func_type_token(token* tok)
-{
-    char* name = token_to_str(tok);
-    return find_func_type(name);
 }
 
 obj* new_lvar(token* tok, type* ty)
 {
-    obj* var = malloc(sizeof(obj));
-    memset(var, 0, sizeof(obj));
-    var->name = token_to_str(tok);
-    var->ty = ty;
+    obj* var = new_obj(tok, ty);
     var->is_local = 1;
     stack_offset = align_to(stack_offset, 8);
     stack_offset = stack_offset + ty->size;
@@ -693,10 +711,17 @@ node* new_null(void)
     return new_node(ND_NULL);
 }
 
+node* new_var_node(obj* var)
+{
+    node* n = new_node(ND_VAR);
+    n->var = var;
+    n->ty = var->ty;
+    return n;
+}
+
 function* new_function(token* name, obj* params, node* body)
 {
-    function* fn = malloc(sizeof(function));
-    memset(fn, 0, sizeof(function));
+    function* fn = calloc(1, sizeof(function));
     fn->name = name;
     fn->body = body;
     fn->params = params;
@@ -707,10 +732,7 @@ function* new_function(token* name, obj* params, node* body)
 
 void add_type_name(token* tok, type* ty)
 {
-    name* n = malloc(sizeof(name));
-    n->pt = tok->pt;
-    n->len = tok->len;
-    n->val = 0;
+    name* n = new_name(tok);
     n->ty = ty;
     n->next = type_names;
     type_names = n;
@@ -720,10 +742,7 @@ void add_struct_tag(token* tok, type* ty)
 {
     name* n = find_name(struct_tags, tok);
     if (!n) {
-        n = malloc(sizeof(name));
-        n->pt = tok->pt;
-        n->len = tok->len;
-        n->val = 0;
+        n = new_name(tok);
         n->next = struct_tags;
         struct_tags = n;
     }
@@ -732,9 +751,7 @@ void add_struct_tag(token* tok, type* ty)
 
 void add_enum_const(token* tok, int val)
 {
-    name* n = malloc(sizeof(name));
-    n->pt = tok->pt;
-    n->len = tok->len;
+    name* n = new_name(tok);
     n->val = val;
     n->ty = ty_int;
     n->next = enum_consts;
@@ -768,6 +785,19 @@ node* expr(void);
 node* declaration_rest(int is_typedef, int make_lvars);
 node* statement(void);
 type* declarator(type* ty, token** name);
+
+member* struct_member(type* base_ty, int* offset)
+{
+    token* name;
+    type* mem_ty = declarator(base_ty, &name);
+    int align = mem_ty->size;
+    if (align > 8)
+        align = 8;
+    *offset = align_to(*offset, align);
+    member* mem = new_struct_member(name, mem_ty, *offset);
+    *offset = *offset + mem_ty->size;
+    return mem;
+}
 
 void enum_spec(void)
 {
@@ -821,36 +851,12 @@ type* type_spec(void)
 
             while (!consume("}")) {
                 type* base_ty = type_spec();
-                token* name;
-                type* mem_ty = declarator(base_ty, &name);
-
-                int align = mem_ty->size;
-                if (align > 8)
-                    align = 8;
-                offset = align_to(offset, align);
-                member* mem = malloc(sizeof(member));
-                memset(mem, 0, sizeof(member));
-                mem->name = token_to_str(name);
-                mem->ty = mem_ty;
-                mem->offset = offset;
-                tail->next = mem;
-                tail = mem;
-                offset = offset + mem_ty->size;
+                tail->next = struct_member(base_ty, &offset);
+                tail = tail->next;
 
                 while (consume(",")) {
-                    mem_ty = declarator(base_ty, &name);
-                    align = mem_ty->size;
-                    if (align > 8)
-                        align = 8;
-                    offset = align_to(offset, align);
-                    mem = malloc(sizeof(member));
-                    memset(mem, 0, sizeof(member));
-                    mem->name = token_to_str(name);
-                    mem->ty = mem_ty;
-                    mem->offset = offset;
-                    tail->next = mem;
-                    tail = mem;
-                    offset = offset + mem_ty->size;
+                    tail->next = struct_member(base_ty, &offset);
+                    tail = tail->next;
                 }
 
                 expect(";");
@@ -917,6 +923,27 @@ node* initializer(void)
     return expr();
 }
 
+node* declaration_one(type* base_ty, int is_typedef, int make_lvars)
+{
+    token* decl_name;
+    type* ty = declarator(base_ty, &decl_name);
+
+    if (is_typedef)
+        add_type_name(decl_name, ty);
+
+    obj* var = NULL;
+    if (make_lvars)
+        var = new_lvar(decl_name, ty);
+
+    if (consume("=")) {
+        node* init = initializer();
+        if (var && init->kind != ND_NULL)
+            return new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, new_var_node(var), init));
+    }
+
+    return NULL;
+}
+
 node* declaration_rest(int is_typedef, int make_lvars)
 {
     node head;
@@ -928,42 +955,14 @@ node* declaration_rest(int is_typedef, int make_lvars)
     if (consume(";"))
         return new_null();
 
-    token* decl_name;
-    type* ty = declarator(base_ty, &decl_name);
-    if (is_typedef)
-        add_type_name(decl_name, ty);
-    obj* var = NULL;
-    if (make_lvars)
-        var = new_lvar(decl_name, ty);
-
-    if (consume("=")) {
-        node* init = initializer();
-        if (var && init->kind != ND_NULL) {
-            node* lhs = new_node(ND_VAR);
-            lhs->var = var;
-            lhs->ty = var->ty;
-            tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
-            tail = tail->next;
-        }
-    }
+    tail->next = declaration_one(base_ty, is_typedef, make_lvars);
+    if (tail->next)
+        tail = tail->next;
 
     while (consume(",")) {
-        ty = declarator(base_ty, &decl_name);
-        if (is_typedef)
-            add_type_name(decl_name, ty);
-        var = NULL;
-        if (make_lvars)
-            var = new_lvar(decl_name, ty);
-        if (consume("=")) {
-            node* init = initializer();
-            if (var && init->kind != ND_NULL) {
-                node* lhs = new_node(ND_VAR);
-                lhs->var = var;
-                lhs->ty = var->ty;
-                tail->next = new_unary(ND_EXPR_STMT, new_binary(ND_ASSIGN, lhs, init));
-                tail = tail->next;
-            }
-        }
+        tail->next = declaration_one(base_ty, is_typedef, make_lvars);
+        if (tail->next)
+            tail = tail->next;
     }
 
     expect(";");
@@ -1420,10 +1419,9 @@ int current_return_label = -1;
 
 void gen_expr(node* n);
 
-void print_sym(token* tok)
+int is_binary_kind(int kind)
 {
-    out("_");
-    out_token(tok);
+    return kind == ND_ADD || kind == ND_SUB || kind == ND_MUL || kind == ND_DIV || kind == ND_MOD || kind == ND_EQ || kind == ND_NE || kind == ND_LT || kind == ND_LE || kind == ND_LOGAND || kind == ND_LOGOR;
 }
 
 void print_name(char* name)
@@ -1443,36 +1441,12 @@ void print_name(char* name)
         return;
     }
 
-    out("_");
-    out(name);
-}
-
-void emit_text(void)
-{
-    out(".text\n");
-}
-
-void emit_data(void)
-{
-    out(".data\n");
+    outs("_", name, "");
 }
 
 int is_std_stream(char* name)
 {
     return strcmp(name, "stdin") == 0 || strcmp(name, "stdout") == 0 || strcmp(name, "stderr") == 0;
-}
-
-void emit_global(token* name)
-{
-    out(".globl ");
-    print_sym(name);
-    out("\n");
-}
-
-void emit_label(token* name)
-{
-    print_sym(name);
-    out(":\n");
 }
 
 int new_label(void)
@@ -1489,21 +1463,21 @@ void mov_imm(char* reg, int val)
     out("    movz ");
     out(reg);
     out(", #");
-    out_int(lo);
+    out_long(lo);
     out("\n");
     if (val >= 65536) {
         out("    movk ");
         out(reg);
         out(", #");
-        out_int(hi);
+        out_long(hi);
         out(", lsl #16\n");
     }
 }
 
 void emit_func_start(token* name, int stack_size, obj* params)
 {
-    emit_global(name);
-    emit_label(name);
+    outt(".globl _", name, "\n");
+    outt("_", name, ":\n");
     out("    stp x29, x30, [sp, #-16]!    // save frame pointer and link register\n");
     out("    mov x29, sp                  // establish stack frame\n");
     if (stack_size) {
@@ -1517,21 +1491,13 @@ void emit_func_start(token* name, int stack_size, obj* params)
             exit(1);
         }
         mov_imm("x10", var->offset);
-        out("    sub x9, x29, x10             // address of parameter ");
-        out(var->name);
-        out("\n");
+        outs("    sub x9, x29, x10             // address of parameter ", var->name, "\n");
         if (var->ty->size == 1) {
-            out("    strb w");
-            out_int(i);
-            out(", [x9]               // save char parameter\n");
+            outi("    strb w", i, ", [x9]               // save char parameter\n");
         } else if (var->ty->size == 4) {
-            out("    str w");
-            out_int(i);
-            out(", [x9]                // save int parameter\n");
+            outi("    str w", i, ", [x9]                // save int parameter\n");
         } else {
-            out("    str x");
-            out_int(i);
-            out(", [x9]                // save parameter\n");
+            outi("    str x", i, ", [x9]                // save parameter\n");
         }
         i = i + 1;
     }
@@ -1543,9 +1509,7 @@ void emit_return(void)
     if (current_return_label < 0)
         return;
 
-    out("    b .L.return.");
-    out_int(current_return_label);
-    out("               // return\n");
+    outi("    b .L.return.", current_return_label, "               // return\n");
 }
 
 void emit_imm(long val)
@@ -1557,9 +1521,7 @@ void emit_imm(long val)
 
 void emit_func_end(int label)
 {
-    out(".L.return.");
-    out_int(label);
-    out(":\n");
+    outi(".L.return.", label, ":\n");
     out("    mov sp, x29                  // release locals\n");
     out("    ldp x29, x30, [sp], #16      // restore frame pointer and link register\n");
     out("    ret                          // return to caller\n");
@@ -1572,9 +1534,7 @@ void push(void)
 
 void pop(char* reg)
 {
-    out("    ldr ");
-    out(reg);
-    out(", [sp], #16            // pop into ");
+    outs("    ldr ", reg, ", [sp], #16            // pop into ");
     out(reg);
     out("\n");
 }
@@ -1607,6 +1567,15 @@ void store(type* ty)
     out("    str x0, [x1]                 // store value\n");
 }
 
+void scale_ptr(type* ty, char* reg)
+{
+    if (is_ptrlike(ty) && ptr_base(ty)->size != 1) {
+        outi("    mov x2, #", ptr_base(ty)->size, "                  // pointer scale\n");
+        outs("    mul ", reg, ", ");
+        outs(reg, ", x2", "\n");
+    }
+}
+
 void gen_binary(node* n)
 {
     gen_expr(n->lhs);
@@ -1615,29 +1584,14 @@ void gen_binary(node* n)
     pop("x1");
 
     if (n->kind == ND_ADD) {
-        if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
-            out("    mov x2, #");
-            out_int(ptr_base(n->lhs->ty)->size);
-            out("                  // pointer scale\n");
-            out("    mul x0, x0, x2\n");
-        }
-        if (is_ptrlike(n->rhs->ty) && ptr_base(n->rhs->ty)->size != 1) {
-            out("    mov x2, #");
-            out_int(ptr_base(n->rhs->ty)->size);
-            out("                  // pointer scale\n");
-            out("    mul x1, x1, x2\n");
-        }
+        scale_ptr(n->lhs->ty, "x0");
+        scale_ptr(n->rhs->ty, "x1");
         out("    add x0, x1, x0               // x0 = lhs + rhs\n");
         return;
     }
 
     if (n->kind == ND_SUB) {
-        if (is_ptrlike(n->lhs->ty) && ptr_base(n->lhs->ty)->size != 1) {
-            out("    mov x2, #");
-            out_int(ptr_base(n->lhs->ty)->size);
-            out("                  // pointer scale\n");
-            out("    mul x0, x0, x2\n");
-        }
+        scale_ptr(n->lhs->ty, "x0");
         out("    sub x0, x1, x0               // x0 = lhs - rhs\n");
         return;
     }
@@ -1723,9 +1677,7 @@ void gen_funcall(node* n)
         pop(reg);
     }
 
-    out("    bl _");
-    out(n->funcname);
-    out("                       // call function\n");
+    outs("    bl _", n->funcname, "                       // call function\n");
 }
 
 void gen_addr(node* n)
@@ -1733,17 +1685,13 @@ void gen_addr(node* n)
     if (n->kind == ND_VAR) {
         if (n->var->is_local) {
             mov_imm("x10", n->var->offset);
-            out("    sub x0, x29, x10             // address of ");
-            out(n->var->name);
-            out("\n");
+            outs("    sub x0, x29, x10             // address of ", n->var->name, "\n");
             return;
         }
         if (is_std_stream(n->var->name)) {
             out("    adrp x0, ");
             print_name(n->var->name);
-            out("@GOTPAGE          // address of external global ");
-            out(n->var->name);
-            out("\n");
+            outs("@GOTPAGE          // address of external global ", n->var->name, "\n");
             out("    ldr x0, [x0, ");
             print_name(n->var->name);
             out("@GOTPAGEOFF]\n");
@@ -1751,9 +1699,7 @@ void gen_addr(node* n)
         }
         out("    adrp x0, ");
         print_name(n->var->name);
-        out("@PAGE              // address of global ");
-        out(n->var->name);
-        out("\n");
+        outs("@PAGE              // address of global ", n->var->name, "\n");
         out("    add x0, x0, ");
         print_name(n->var->name);
         out("@PAGEOFF\n");
@@ -1769,9 +1715,7 @@ void gen_addr(node* n)
         gen_addr(n->lhs);
         if (n->mem->offset) {
             mov_imm("x10", n->mem->offset);
-            out("    add x0, x0, x10             // address of member ");
-            out(n->mem->name);
-            out("\n");
+            outs("    add x0, x0, x10             // address of member ", n->mem->name, "\n");
         }
         return;
     }
@@ -1791,12 +1735,8 @@ void gen_expr(node* n)
     }
 
     if (n->kind == ND_STR) {
-        out("    adrp x0, .L.str.");
-        out_int(n->str_label);
-        out("@PAGE      // address of string literal\n");
-        out("    add x0, x0, .L.str.");
-        out_int(n->str_label);
-        out("@PAGEOFF\n");
+        outi("    adrp x0, .L.str.", n->str_label, "@PAGE      // address of string literal\n");
+        outi("    add x0, x0, .L.str.", n->str_label, "@PAGEOFF\n");
         return;
     }
 
@@ -1838,7 +1778,7 @@ void gen_expr(node* n)
         return;
     }
 
-    if (n->kind == ND_ADD || n->kind == ND_SUB || n->kind == ND_MUL || n->kind == ND_DIV || n->kind == ND_MOD || n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE || n->kind == ND_LOGAND || n->kind == ND_LOGOR) {
+    if (is_binary_kind(n->kind)) {
         gen_binary(n);
         return;
     }
@@ -1881,53 +1821,33 @@ void gen_stmt(node* n)
         gen_expr(n->cond);
         out("    cmp x0, #0                   // if condition\n");
         if (n->els) {
-            out("    beq .L.else.");
-            out_int(label);
-            out("\n");
+            outi("    beq .L.else.", label, "\n");
             gen_stmt(n->then);
-            out("    b .L.end.");
-            out_int(label);
-            out("\n");
-            out(".L.else.");
-            out_int(label);
-            out(":\n");
+            outi("    b .L.end.", label, "\n");
+            outi(".L.else.", label, ":\n");
             gen_stmt(n->els);
-            out(".L.end.");
-            out_int(label);
-            out(":\n");
+            outi(".L.end.", label, ":\n");
             return;
         }
-        out("    beq .L.end.");
-        out_int(label);
-        out("\n");
+        outi("    beq .L.end.", label, "\n");
         gen_stmt(n->then);
-        out(".L.end.");
-        out_int(label);
-        out(":\n");
+        outi(".L.end.", label, ":\n");
         return;
     }
 
     if (n->kind == ND_FOR) {
         int label = new_label();
         gen_stmt(n->init);
-        out(".L.begin.");
-        out_int(label);
-        out(":\n");
+        outi(".L.begin.", label, ":\n");
         if (n->cond) {
             gen_expr(n->cond);
             out("    cmp x0, #0                   // loop condition\n");
-            out("    beq .L.end.");
-            out_int(label);
-            out("\n");
+            outi("    beq .L.end.", label, "\n");
         }
         gen_stmt(n->then);
         gen_expr(n->inc);
-        out("    b .L.begin.");
-        out_int(label);
-        out("\n");
-        out(".L.end.");
-        out_int(label);
-        out(":\n");
+        outi("    b .L.begin.", label, "\n");
+        outi(".L.end.", label, ":\n");
         return;
     }
 
@@ -1946,15 +1866,11 @@ void gen_function(function* fn)
 
 void gen_program(function* prog)
 {
-    emit_data();
+    out(".data\n");
 
     for (string_lit* s = strings; s; s = s->next) {
-        out(".L.str.");
-        out_int(s->label);
-        out(":\n");
-        out("    .asciz ");
-        out_token(s->tok);
-        out("\n");
+        outi(".L.str.", s->label, ":\n");
+        outt("    .asciz ", s->tok, "\n");
     }
 
     for (obj* var = globals; var; var = var->next) {
@@ -1963,12 +1879,10 @@ void gen_program(function* prog)
         out("\n");
         print_name(var->name);
         out(":\n");
-        out("    .zero ");
-        out_int(var->ty->size);
-        out("\n");
+        outi("    .zero ", var->ty->size, "\n");
     }
 
-    emit_text();
+    out(".text\n");
 
     for (function* fn = prog; fn; fn = fn->next)
         gen_function(fn);
